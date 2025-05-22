@@ -1,15 +1,30 @@
 // app.js
 require('dotenv').config();
 const express = require('express');
-const passport = require('passport');
-require('./config/passport')(passport); // Passport config
+const cors = require("cors");
 
-const app = express();
-app.use(express.json());
-app.use(passport.initialize());
+const passport = require('passport');
+const bodyParser = require('body-parser');
 
 // Routes
-app.get('/', (req, res) => res.send('Pharmacy Stock System API'));
+const authRoutes = require('./src/routes/auth.routes');
+const productRoutes = require('./src/routes/product.routes');
+const pharmacyRoutes = require('./src/routes/pharmacy.routes');
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const app = express();
+
+app.use(cors());
+app.use(bodyParser.json());
+app.use(passport.initialize());
+require('./src/config/passport')(passport);
+
+
+app.use('/api/auth', authRoutes);
+app.use('/api/products', productRoutes);
+app.use('/api/pharmacies', pharmacyRoutes);
+
+const httpServer = require('http').createServer(app);
+
+const port = process.env.PORT;
+
+httpServer.listen(port, '0.0.0.0', () => console.log(`Up & Running on port ${port}`));
