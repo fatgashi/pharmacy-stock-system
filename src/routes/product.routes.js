@@ -9,6 +9,7 @@ router.use(authenticateJWT);
 
 // Add product to pharmacy stock
 router.post('/add', authenticateJWT, authorizeRole("user"), productController.addProductToPharmacy);
+router.post('/add-batch', authenticateJWT, authorizeRole("user"), productController.addStockByBarcode);
 
 // Search by barcode (for scanner)
 router.get('/barcode/:barcode', authenticateJWT, authorizeRole("user"), productController.getProductByBarcode);

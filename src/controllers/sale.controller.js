@@ -63,19 +63,17 @@ const { safeBody } = require('../helpers/safeBody');
 // };
 
 exports.confirmSale = async (req, res) => {
-    let connection;
+  let connection;
 
-    const { items, amount_given } = safeBody(req);
-    const { pharmacy_id, id: user_id } = req.user;
+  const { items, amount_given } = safeBody(req);
+  const { pharmacy_id, id: user_id } = req.user;
 
-    if (!items || !Array.isArray(items) || items.length === 0 || amount_given == null) {
-      return res.status(400).json({ message: 'Invalid cart or amount' });
-    }
+  if (!items || !Array.isArray(items) || items.length === 0 || amount_given == null) {
+    return res.status(400).json({ message: 'Invalid cart or amount' });
+  }
+
   try {
-
-    // ✅ Get a raw connection
     connection = await db.getConnection();
-
     await connection.beginTransaction();
 
     let total = 0;
@@ -84,22 +82,40 @@ exports.confirmSale = async (req, res) => {
     for (const item of items) {
       const { barcode, quantity } = item;
 
-      const [rows] = await connection.query(
-        `SELECT pg.name, pg.barcode, pp.price, pp.quantity AS stock, pg.id AS global_product_id
+      const [productRows] = await connection.query(
+        `SELECT pg.name, pg.barcode, pp.price, pg.id AS global_product_id, pp.id AS pharmacy_product_id
          FROM products_global pg
          JOIN pharmacy_products pp ON pp.global_product_id = pg.id
          WHERE pg.barcode = ? AND pp.pharmacy_id = ?`,
         [barcode, pharmacy_id]
       );
 
-      const product = rows[0];
-
+      const product = productRows[0];
       if (!product) {
         await connection.rollback();
         return res.status(404).json({ message: `Produkti me barcode ${barcode} nuk u gjete ne stok!` });
       }
 
-      if (product.stock < quantity) {
+      const [batchRows] = await connection.query(
+        `SELECT * FROM product_batches
+        WHERE pharmacy_product_id = ? AND pharmacy_id = ? AND quantity > 0
+        ORDER BY expiry_date ASC`,
+        [product.pharmacy_product_id, pharmacy_id]
+      );
+
+      let remainingQty = quantity;
+      const batchUpdates = [];
+
+      for (const batch of batchRows) {
+        if (remainingQty <= 0) break;
+
+        const usedQty = Math.min(batch.quantity, remainingQty);
+        remainingQty -= usedQty;
+
+        batchUpdates.push({ batch_id: batch.id, usedQty });
+      }
+
+      if (remainingQty > 0) {
         await connection.rollback();
         return res.status(400).json({ message: `Stoku nuk perputhet per ${product.name}!` });
       }
@@ -113,7 +129,9 @@ exports.confirmSale = async (req, res) => {
         quantity,
         price: product.price,
         subtotal,
-        global_product_id: product.global_product_id
+        global_product_id: product.global_product_id,
+        pharmacy_product_id: product.pharmacy_product_id,
+        batchUpdates
       });
     }
 
@@ -132,18 +150,48 @@ exports.confirmSale = async (req, res) => {
 
     for (const item of saleItems) {
       await connection.query(
-        `INSERT INTO sale_items
-         (sale_id, product_barcode, product_name, quantity, price, subtotal)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sale_items (sale_id, product_barcode, product_name, quantity, price, subtotal)
+        VALUES (?, ?, ?, ?, ?, ?)`,
         [sale_id, item.barcode, item.name, item.quantity, item.price, item.subtotal]
       );
 
+      // 🔁 Update all affected batches
+      for (const { batch_id, usedQty } of item.batchUpdates) {
+        await connection.query(
+          `UPDATE product_batches
+          SET quantity = quantity - ?
+          WHERE id = ? AND pharmacy_id = ?`,
+          [usedQty, batch_id, pharmacy_id]
+        );
+      }
+
+      // 🔁 Update total stock in pharmacy_products
       await connection.query(
         `UPDATE pharmacy_products
-         SET quantity = quantity - ?
-         WHERE global_product_id = ? AND pharmacy_id = ?`,
-        [item.quantity, item.global_product_id, pharmacy_id]
+        SET quantity = quantity - ?
+        WHERE id = ?`,
+        [item.quantity, item.pharmacy_product_id]
       );
+
+      // ✅ Update expiry_date based on next available batch (after batch updates)
+      const [remainingBatches] = await connection.query(
+        `SELECT expiry_date
+        FROM product_batches
+        WHERE pharmacy_product_id = ? AND pharmacy_id = ? AND quantity > 0
+        ORDER BY expiry_date ASC
+        LIMIT 1`,
+        [item.pharmacy_product_id, pharmacy_id]
+      );
+
+      if (remainingBatches.length > 0) {
+        const newExpiry = remainingBatches[0].expiry_date;
+        await connection.query(
+          `UPDATE pharmacy_products
+          SET expiry_date = ?
+          WHERE id = ?`,
+          [newExpiry, item.pharmacy_product_id]
+        );
+      }
     }
 
     await connection.commit();
@@ -153,7 +201,13 @@ exports.confirmSale = async (req, res) => {
       sale_id,
       total: total.toFixed(2),
       change: change.toFixed(2),
-      items: saleItems
+      items: saleItems.map(i => ({
+        barcode: i.barcode,
+        name: i.name,
+        quantity: i.quantity,
+        price: i.price,
+        subtotal: i.subtotal.toFixed(2)
+      }))
     });
   } catch (err) {
     if (connection) await connection.rollback();

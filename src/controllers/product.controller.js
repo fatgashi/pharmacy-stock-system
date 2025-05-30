@@ -3,60 +3,60 @@ const { safeBody } = require('../helpers/safeBody');
 
 // Add or Link Product to Pharmacy Stock
 exports.addProductToPharmacy = async (req, res) => {
-    const { barcode, quantity, price, expiry_date, custom_name, manufacturer, description } = safeBody(req);
-    const { pharmacy_id } = req.user;
-    const user_id = req.user.id;
+  const { barcode, quantity, price, expiry_date, custom_name, manufacturer, description } = safeBody(req);
+  const { pharmacy_id, id: user_id } = req.user;
 
-    if (!barcode || !quantity || !price || !custom_name || !manufacturer || !description) {
-      return res.status(400).json({ message: 'Mungojn fushat e kerkuara (barcode, quantity, price, custom_name)!' });
+  if (!barcode || !quantity || !price || !custom_name || !manufacturer || !description || !expiry_date) {
+    return res.status(400).json({ message: 'Mungojnë fushat e kërkuara (barcode, quantity, price, expiry_date, custom_name, manufacturer, description)!' });
+  }
+
+  try {
+    // 🔍 Check if global product exists
+    let [globalProduct] = await db.query('SELECT * FROM products_global WHERE barcode = ?', [barcode]);
+
+    if (!globalProduct) {
+      const insert = await db.query(
+        'INSERT INTO products_global (name, barcode, manufacturer, description) VALUES (?, ?, ?, ?)',
+        [custom_name, barcode, manufacturer, description]
+      );
+      const [inserted] = await db.query('SELECT * FROM products_global WHERE id = LAST_INSERT_ID()');
+      globalProduct = inserted;
     }
 
-    try {
-      let [globalProduct] = await db.query(
-        'SELECT * FROM products_global WHERE barcode = ?',
-        [barcode]
-      );
+    // 🔍 Check if product already linked to this pharmacy
+    const [pharmacyProduct] = await db.query(
+      'SELECT * FROM pharmacy_products WHERE global_product_id = ? AND pharmacy_id = ?',
+      [globalProduct.id, pharmacy_id]
+    );
 
-      // ✅ If not found, create it globally
-      if (!globalProduct) {
-        const insert = await db.query(
-          'INSERT INTO products_global (name, barcode, manufacturer, description) VALUES (?, ?, ?, ?)',
-          [custom_name, barcode, manufacturer || '', description || '']
-        );
+    let pharmacyProductId;
 
-        // Refetch the inserted product to get its ID
-        const [inserted] = await db.query('SELECT * FROM products_global WHERE id = LAST_INSERT_ID()');
-        globalProduct = inserted;
-      }
-
-      // 🚫 Check if already exists in this pharmacy
-      const exists = await db.query(
-        'SELECT * FROM pharmacy_products WHERE global_product_id = ? AND pharmacy_id = ?',
-        [globalProduct.id, pharmacy_id]
-      );
-
-      if (exists.length > 0) {
-        return res.status(409).json({ message: 'Product tashme egziston ne stok!' });
-      }
-
-      const normalizedExpiry = expiry_date.includes('T') || expiry_date.includes(':')
-        ? expiry_date
-        : `${expiry_date} 23:00`;
-
-      // ✅ Insert into pharmacy_products
-      await db.query(
+    if (!pharmacyProduct) {
+      // 🧾 Create new link to pharmacy
+      const result = await db.query(
         `INSERT INTO pharmacy_products (pharmacy_id, user_id, global_product_id, custom_name, quantity, price, expiry_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [pharmacy_id, user_id, globalProduct.id, custom_name, quantity, price, normalizedExpiry]
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [pharmacy_id, user_id, globalProduct.id, custom_name, quantity, price, expiry_date]
       );
-
-      res.status(201).json({ message: 'Product u shtua ne stok!' });
-    } catch (err) {
-      console.error('Add Product Error:', err);
-      res.status(500).json({ message: 'Server error' });
+      const [inserted] = await db.query('SELECT * FROM pharmacy_products WHERE id = LAST_INSERT_ID()');
+      pharmacyProductId = inserted.id;
+    } else {
+      pharmacyProductId = pharmacyProduct.id;
     }
-};
 
+    // 🧾 Insert batch with pharmacy_id included
+    await db.query(
+      `INSERT INTO product_batches (pharmacy_id, pharmacy_product_id, quantity, expiry_date)
+       VALUES (?, ?, ?, ?)`,
+      [pharmacy_id, pharmacyProductId, quantity, expiry_date]
+    );
+
+    res.status(201).json({ message: 'Produkti dhe batch-i u shtuan me sukses!' });
+  } catch (err) {
+    console.error('Add Product Error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
 
 // Search by barcode (scanner)
 exports.getProductByBarcode = async (req, res) => {
@@ -135,6 +135,67 @@ exports.listPharmacyProducts = async (req, res) => {
     res.json({ data: products, page, limit, total: products.length });
   } catch (err) {
     console.error('List Products Error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+exports.addStockByBarcode = async (req, res) => {
+  const { barcode, quantity, expiry_date, price, update_price } = req.body;
+  const { pharmacy_id } = req.user;
+
+  if (!barcode || !quantity || !expiry_date) {
+    return res.status(400).json({ message: 'Mungojnë fushat e kërkuara (barcode, quantity, expiry_date)!' });
+  }
+
+  try {
+    // 🔍 Find pharmacy product
+    const [result] = await db.query(
+      `SELECT pp.id AS pharmacy_product_id, pp.quantity AS current_quantity
+       FROM products_global pg
+       JOIN pharmacy_products pp ON pg.id = pp.global_product_id
+       WHERE pg.barcode = ? AND pp.pharmacy_id = ?`,
+      [barcode, pharmacy_id]
+    );
+
+    if (!result) {
+      return res.status(404).json({ message: 'Produkti nuk u gjet në këtë farmaci!' });
+    }
+
+    const { pharmacy_product_id, current_quantity } = result;
+
+    // ➕ Insert batch
+    await db.query(
+      `INSERT INTO product_batches (pharmacy_id, pharmacy_product_id, quantity, expiry_date)
+       VALUES (?, ?, ?, ?)`,
+      [pharmacy_id, pharmacy_product_id, quantity, expiry_date]
+    );
+
+    // 🔄 Prepare update fields
+    const updateFields = [`quantity = quantity + ?`];
+    const updateParams = [quantity];
+
+    // 🔄 Update price if requested
+    if (update_price === true && price) {
+      updateFields.push(`price = ?`);
+      updateParams.push(price);
+    }
+
+    // ✅ If current quantity is 0, update expiry date to this batch's date
+    if (current_quantity === 0) {
+      updateFields.push(`expiry_date = ?`);
+      updateParams.push(expiry_date);
+    }
+
+    updateParams.push(pharmacy_product_id);
+
+    await db.query(
+      `UPDATE pharmacy_products SET ${updateFields.join(', ')} WHERE id = ?`,
+      updateParams
+    );
+
+    res.status(200).json({ message: 'Stoku i ri u shtua me sukses përmes barkodit!' });
+  } catch (err) {
+    console.error('Add Stock by Barcode Error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };

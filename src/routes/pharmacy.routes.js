@@ -7,5 +7,8 @@ const pharmacyController = require('../controllers/pharmacy.controller');
 
 // Only admins can add pharmacies
 router.post('/add', authenticateJWT, authorizeRoles('admin'), pharmacyController.addPharmacy);
+router.get('/list', authenticateJWT, pharmacyController.getPharmacies);
+router.get('/details/:id', authenticateJWT, authorizeRoles("admin", "pharmacy_admin"), pharmacyController.getPharmacyById);
+router.put('/update/:id', authenticateJWT, pharmacyController.updatePharmacy);
 
 module.exports = router;
