@@ -192,6 +192,43 @@ exports.confirmSale = async (req, res) => {
           [newExpiry, item.pharmacy_product_id]
         );
       }
+
+      // 🔔 Low stock notification
+      const [settingsRows] = await connection.query(
+        `SELECT low_stock_threshold FROM pharmacy_settings WHERE pharmacy_id = ?`,
+        [pharmacy_id]
+      );
+
+      const lowStockThreshold = settingsRows[0]?.low_stock_threshold || 10;
+
+      const [currentStockRows] = await connection.query(
+        `SELECT quantity FROM pharmacy_products WHERE id = ?`,
+        [item.pharmacy_product_id]
+      );
+
+      const currentQty = currentStockRows[0]?.quantity || 0;
+
+      if (currentQty <= lowStockThreshold) {
+        // Check if unresolved notification already exists
+        const [existingNotifs] = await connection.query(
+          `SELECT id FROM notifications
+          WHERE pharmacy_id = ? AND product_id = ? AND type = 'low_stock' AND is_resolved = FALSE`,
+          [pharmacy_id, item.pharmacy_product_id]
+        );
+
+        if (existingNotifs.length === 0) {
+          // Insert new notification
+          await connection.query(
+            `INSERT INTO notifications (pharmacy_id, product_id, type, message)
+            VALUES (?, ?, 'low_stock', ?)`,
+            [
+              pharmacy_id,
+              item.pharmacy_product_id,
+              `Produkti '${item.name}' ka stok të ulët (${currentQty} njësi).`
+            ]
+          );
+        }
+      }
     }
 
     await connection.commit();
@@ -210,11 +247,11 @@ exports.confirmSale = async (req, res) => {
       }))
     });
   } catch (err) {
-    if (connection) await connection.rollback();
-    console.error('Sale Confirm Error:', err);
-    res.status(500).json({ message: 'Server error' });
+      if (connection) await connection.rollback();
+      console.error('Sale Confirm Error:', err);
+      res.status(500).json({ message: 'Server error' });
   } finally {
-    if (connection) connection.release();
+     if (connection) connection.release();
   }
 };
 

@@ -30,6 +30,15 @@ exports.register = async (req, res) => {
             [username, "user", hashedPassword, pharmacy_id]
         );
 
+        const [settings] = await db.query('SELECT id FROM pharmacy_settings WHERE pharmacy_id = ?', [pharmacy_id]);
+        if (!settings) {
+            await db.query(
+            `INSERT INTO pharmacy_settings (pharmacy_id, low_stock_threshold, expiry_alert_days, notify_by_email, notify_by_dashboard)
+            VALUES (?, 20, 30, FALSE, TRUE)`,
+            [pharmacy_id]
+            );
+        }
+
         } else if (target === 'admin') {
         if (!role) return res.status(400).json({ message: 'Role eshte i kerkuar per regjistrimin e adminave!' });
         await db.query(

@@ -163,7 +163,7 @@ exports.addStockByBarcode = async (req, res) => {
 
     const { pharmacy_product_id, current_quantity } = result;
 
-    // ➕ Insert batch
+    // ➕ Insert new batch
     await db.query(
       `INSERT INTO product_batches (pharmacy_id, pharmacy_product_id, quantity, expiry_date)
        VALUES (?, ?, ?, ?)`,
@@ -188,9 +188,18 @@ exports.addStockByBarcode = async (req, res) => {
 
     updateParams.push(pharmacy_product_id);
 
+    // 🔄 Update the pharmacy_products table
     await db.query(
       `UPDATE pharmacy_products SET ${updateFields.join(', ')} WHERE id = ?`,
       updateParams
+    );
+
+    // ✅ Resolve any unresolved low stock notifications for this product
+    await db.query(
+      `UPDATE notifications
+       SET is_resolved = TRUE
+       WHERE pharmacy_id = ? AND product_id = ? AND type = 'low_stock' AND is_resolved = FALSE`,
+      [pharmacy_id, pharmacy_product_id]
     );
 
     res.status(200).json({ message: 'Stoku i ri u shtua me sukses përmes barkodit!' });

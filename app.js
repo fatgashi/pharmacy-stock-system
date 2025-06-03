@@ -12,6 +12,7 @@ const productRoutes = require('./src/routes/product.routes');
 const pharmacyRoutes = require('./src/routes/pharmacy.routes');
 const saleRoutes = require('./src/routes/sale.routes');
 const usersRoutes = require('./src/routes/users.routes');
+const notificationsRoutes = require('./src/routes/notifications.routes');
 
 const app = express();
 
@@ -27,6 +28,7 @@ app.use('/api/products', productRoutes);
 app.use('/api/pharmacies', pharmacyRoutes);
 app.use('/api/sale', saleRoutes);
 app.use('/api/users', usersRoutes);
+app.use('/api/notifications', notificationsRoutes);
 
 const httpServer = require('http').createServer(app);
 
