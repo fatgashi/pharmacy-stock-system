@@ -208,3 +208,96 @@ exports.addStockByBarcode = async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 };
+
+exports.markBatchStatus = async (req, res) => {
+  const { id } = req.params;
+  const { status, reason } = safeBody(req);
+  const { pharmacy_id } = req.user;
+
+  if (!['disposed', 'returned'].includes(status)) {
+    return res.status(400).json({ message: 'Status i pavlefshëm!' });
+  }
+
+  try {
+    // Allow batch regardless of expiry, but make sure it exists and has quantity
+    const [batch] = await db.query(
+      `SELECT quantity, pharmacy_product_id, status FROM product_batches
+       WHERE id = ? AND pharmacy_id = ? AND quantity > 0`,
+      [id, pharmacy_id]
+    );
+
+    if (!batch) {
+      return res.status(404).json({ message: 'Batch nuk u gjet ose nuk ka sasi për përpunim!' });
+    }
+
+    if (['disposed', 'returned'].includes(batch.status)) {
+      return res.status(400).json({ message: 'Ky batch është trajtuar më parë!' });
+    }
+
+    // 1. Update batch status (you can optionally save `reason`)
+    await db.query(
+      `UPDATE product_batches SET status = ?, updated_at = NOW() WHERE id = ?`,
+      [status, id]
+    );
+
+    // 2. Decrease total quantity in pharmacy_products
+    await db.query(
+      `UPDATE pharmacy_products
+       SET quantity = quantity - ?
+       WHERE id = ? AND pharmacy_id = ?`,
+      [batch.quantity, batch.pharmacy_product_id, pharmacy_id]
+    );
+
+    res.status(200).json({ message: `Batch u shënua si "${status}". Stoku u përditësua.` });
+  } catch (err) {
+    console.error('Mark Batch Error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+
+exports.getExpiredProducts = async (req, res) => {
+  const { pharmacy_id } = req.user;
+  const search = req.query.search?.trim();
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 20;
+  const offset = (page - 1) * limit;
+
+  try {
+    let query = `
+      SELECT pb.id AS batch_id, pb.expiry_date, pb.quantity,
+             pp.id AS pharmacy_product_id, pp.custom_name,
+             pg.barcode, pb.status
+      FROM product_batches pb
+      JOIN pharmacy_products pp ON pb.pharmacy_product_id = pp.id
+      JOIN products_global pg ON pp.global_product_id = pg.id
+      WHERE pb.pharmacy_id = ? AND pb.status = 'expired'
+    `;
+    const params = [pharmacy_id];
+
+    if (search) {
+      query += ` AND (pg.barcode LIKE ? OR pp.custom_name LIKE ?)`;
+      params.push(`%${search}%`, `%${search}%`);
+    }
+
+    const countQuery = `SELECT COUNT(*) AS total FROM (${query}) AS sub`;
+    const countRows = await db.query(countQuery, params);
+    const total = countRows[0]?.total || 0;
+
+    query += ` ORDER BY pb.expiry_date ASC LIMIT ? OFFSET ?`;
+    params.push(limit, offset);
+
+    const expiredProducts = await db.query(query, params);
+
+    res.json({
+      data: expiredProducts,
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit)
+    });
+  } catch (err) {
+    console.error('Get Expired Products Error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};

@@ -17,4 +17,8 @@ router.get('/barcode/:barcode', authenticateJWT, authorizeRole("user"), productC
 // List all products in pharmacy
 router.get('/list', authenticateJWT, authorizeRole("user"), productController.listPharmacyProducts);
 
+router.put('/batch/:id/status', authenticateJWT, authorizeRole("user"), productController.markBatchStatus);
+
+router.get('/expired', authenticateJWT, authorizeRole("user"), productController.getExpiredProducts);
+
 module.exports = router;

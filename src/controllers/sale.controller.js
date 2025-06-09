@@ -98,7 +98,7 @@ exports.confirmSale = async (req, res) => {
 
       const [batchRows] = await connection.query(
         `SELECT * FROM product_batches
-        WHERE pharmacy_product_id = ? AND pharmacy_id = ? AND quantity > 0
+        WHERE pharmacy_product_id = ? AND pharmacy_id = ? AND quantity > 0 AND status = 'active'
         ORDER BY expiry_date ASC`,
         [product.pharmacy_product_id, pharmacy_id]
       );
