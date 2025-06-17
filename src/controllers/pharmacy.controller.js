@@ -198,3 +198,17 @@ exports.getPharmacyById = async (req, res) => {
     res.status(500).json({ message: 'Gabim serveri.' });
   }
 };
+
+exports.getPharmacyAdmins = async (req, res) => {
+  try {
+    const results = await db.query(
+      'SELECT id, username FROM admins WHERE role = ?',
+      ['pharmacy_admin']
+    );
+
+    res.json({ data: results });
+  } catch (err) {
+    console.error('Get Pharmacy Admins Error:', err);
+    res.status(500).json({ message: 'Gabim serveri.' });
+  }
+};
