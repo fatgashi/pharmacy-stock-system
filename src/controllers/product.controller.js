@@ -140,7 +140,7 @@ exports.listPharmacyProducts = async (req, res) => {
 };
 
 exports.addStockByBarcode = async (req, res) => {
-  const { barcode, quantity, expiry_date, price, update_price } = req.body;
+  const { barcode, quantity, expiry_date, price, update_price } = safeBody(req);
   const { pharmacy_id } = req.user;
 
   if (!barcode || !quantity || !expiry_date) {
@@ -299,5 +299,89 @@ exports.getExpiredProducts = async (req, res) => {
   } catch (err) {
     console.error('Get Expired Products Error:', err);
     res.status(500).json({ message: 'Server error' });
+  }
+};
+
+exports.editBatch = async (req, res) => {
+  const { id } = req.params;
+  const { quantity, price, expiry_date } = safeBody(req);
+  const { pharmacy_id } = req.user;
+
+  try {
+    // 1. Get the original batch info
+    const [batches] = await db.query(
+      `SELECT * FROM product_batches WHERE id = ? AND pharmacy_id = ? AND status = 'active'`,
+      [id, pharmacy_id]
+    );
+
+    if (batches.length === 0) {
+      return res.status(404).json({ message: 'Batch jo i gjetur ose jo i vlefshëm!' });
+    }
+
+    const batch = batches;
+    const quantityDiff = quantity - batch.quantity;
+
+    // 2. Update the batch
+    const updateFields = [];
+    const updateParams = [];
+
+    if (quantity != null) {
+      updateFields.push('quantity = ?');
+      updateParams.push(quantity);
+    }
+
+    if (expiry_date != null) {
+      updateFields.push('expiry_date = ?');
+      updateParams.push(expiry_date);
+    }
+
+    if (updateFields.length === 0 && price == null) {
+      return res.status(400).json({ message: 'Nuk ka ndryshime për të bërë.' });
+    }
+
+    if (updateFields.length > 0) {
+      updateParams.push(id);
+
+      await db.query(
+        `UPDATE product_batches SET ${updateFields.join(', ')} WHERE id = ?`,
+        updateParams
+      );
+    }
+
+    // 3. Update pharmacy_products.quantity if quantity changed
+    if (quantity != null) {
+      await db.query(
+        `UPDATE pharmacy_products SET quantity = quantity + ? WHERE id = ? AND pharmacy_id = ?`,
+        [quantityDiff, batch.pharmacy_product_id, pharmacy_id]
+      );
+    }
+
+    // 4. Update pharmacy_products.price if requested
+    if (price != null) {
+      await db.query(
+        `UPDATE pharmacy_products SET price = ? WHERE id = ? AND pharmacy_id = ?`,
+        [price, batch.pharmacy_product_id, pharmacy_id]
+      );
+    }
+
+    // 5. If expiry_date changed, update main product expiry_date (if this batch was the earliest)
+    const newEarliest = await db.query(
+      `SELECT expiry_date FROM product_batches
+      WHERE pharmacy_product_id = ? AND pharmacy_id = ? AND quantity > 0 AND status = 'active'
+      ORDER BY expiry_date ASC LIMIT 1`,
+      [batch.pharmacy_product_id, pharmacy_id]
+    );
+
+    if (newEarliest.length > 0) {
+      await db.query(
+        `UPDATE pharmacy_products SET expiry_date = ? WHERE id = ? AND pharmacy_id = ?`,
+        [newEarliest[0].expiry_date, batch.pharmacy_product_id, pharmacy_id]
+      );
+    }
+
+    res.status(200).json({ message: 'Batch u përditësua me sukses.' });
+  } catch (err) {
+    console.error('Edit Batch Error:', err);
+    res.status(500).json({ message: 'Gabim serveri.' });
   }
 };
