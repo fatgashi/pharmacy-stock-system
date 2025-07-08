@@ -5,7 +5,7 @@ const authenticateJWT = require('../middlewares/auth.middleware');
 const authRoleMiddleware = require('../middlewares/authRole.middleware');
 
 // Register
-router.post('/register', authenticateJWT, authRoleMiddleware('admin'), authController.register);
+router.post('/register', authenticateJWT, authRoleMiddleware('admin', 'pharmacy_admin'), authController.register);
 
 // Login
 router.post('/login', authController.login);

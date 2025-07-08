@@ -5,55 +5,101 @@ const { safeBody } = require('../helpers/safeBody');
 require('dotenv').config();
 
 exports.register = async (req, res) => {
-    const { username, password, role, pharmacy_id, target } = safeBody(req);
-    
-    if (!username || !password || !target) {
-        return res.status(400).json({ message: 'Mungon username, password ose target!' });
-    }
-    try {
-        
-        // Check if username exists in either table
-        const [existingUser] = await db.query('SELECT * FROM users WHERE username = ?', [username]);
-        const [existingAdmin] = await db.query('SELECT * FROM admins WHERE username = ?', [username]);
+  const { username, password, role: inputRole, pharmacy_id: inputPharmacyId, target } = safeBody(req);
+  const { role, id } = req.user;
 
-        if (existingUser || existingAdmin) {
-        return res.status(409).json({ message: 'Ky user ekziston!' });
+  if (!username || !password || !target) {
+    return res.status(400).json({ message: 'Mungon username, password ose target!' });
+  }
+
+  try {
+    // Check if username exists in either table
+    const [existingUser] = await db.query('SELECT * FROM users WHERE username = ?', [username]);
+    const [existingAdmin] = await db.query('SELECT * FROM admins WHERE username = ?', [username]);
+
+    if (existingUser || existingAdmin) {
+      return res.status(409).json({ message: 'Ky user ekziston!' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    if (target === 'user') {
+        if (!inputPharmacyId) {
+            return res.status(400).json({ message: 'pharmacy_id është i kërkuar për regjistrimin nga pharmacy_admin!' });
         }
 
-        const hashedPassword = await bcrypt.hash(password, 10);
+        let finalPharmacyId = inputPharmacyId;
 
-        if (target === 'user') {
-        if (!pharmacy_id) return res.status(400).json({ message: 'pharmacy_id eshte i kerkuar per regjistrimin e userit!' });
+        if (role === 'pharmacy_admin') {
+
+            const [pharmacy] = await db.query(
+            'SELECT * FROM pharmacies WHERE id = ? AND pharmacy_admin_id = ?',
+            [inputPharmacyId, id]
+            );
+
+            if (!pharmacy) {
+            return res.status(400).json({ message: 'Nuk u gjet farmacia e lidhur me këtë admin!' });
+            }
+
+            finalPharmacyId = pharmacy.id;
+        } else if (role === 'admin') {
+
+            // Optional: validate that pharmacy exists
+            const [pharmacy] = await db.query('SELECT id FROM pharmacies WHERE id = ?', [inputPharmacyId]);
+            if (!pharmacy) {
+            return res.status(404).json({ message: 'Farmacia nuk ekziston!' });
+            }
+
+            finalPharmacyId = inputPharmacyId;
+        } else {
+            return res.status(403).json({ message: 'Nuk keni leje për të shtuar user!' });
+        }
+
+        if (!finalPharmacyId) {
+            return res.status(400).json({ message: 'pharmacy_id është i kërkuar për regjistrimin e userit!' });
+        }
 
         await db.query(
             'INSERT INTO users (username, role, password_hash, pharmacy_id) VALUES (?, ?, ?, ?)',
-            [username, "user", hashedPassword, pharmacy_id]
+            [username, 'user', hashedPassword, finalPharmacyId]
         );
 
-        const [settings] = await db.query('SELECT id FROM pharmacy_settings WHERE pharmacy_id = ?', [pharmacy_id]);
+        const [settings] = await db.query(
+            'SELECT id FROM pharmacy_settings WHERE pharmacy_id = ?',
+            [finalPharmacyId]
+        );
+
         if (!settings) {
             await db.query(
             `INSERT INTO pharmacy_settings (pharmacy_id, low_stock_threshold, expiry_alert_days, notify_by_email, notify_by_dashboard)
             VALUES (?, 20, 30, FALSE, TRUE)`,
-            [pharmacy_id]
+            [finalPharmacyId]
             );
         }
 
-        } else if (target === 'admin') {
-        if (!role) return res.status(400).json({ message: 'Role eshte i kerkuar per regjistrimin e adminave!' });
-        await db.query(
-            'INSERT INTO admins (username, password_hash, role) VALUES (?, ?, ?)',
-            [username, hashedPassword, role]
-        );
-        } else {
-        return res.status(400).json({ message: 'target eshte i pavlefshem. Duhet te jete "user" ose "admin".' });
-        }
+    } else if (target === 'admin') {
+      if (role !== 'admin') {
+        return res.status(403).json({ message: 'Vetëm adminat mund të shtojnë adminë të tjerë!' });
+      }
 
-        return res.status(201).json({ message: 'U regjistrua me sukses!' });
-    } catch (err) {
-        console.error('Register Error:', err);
-        return res.status(500).json({ message: 'Server error' });
+      if (!inputRole) {
+        return res.status(400).json({ message: 'Roli është i kërkuar për regjistrimin e adminit!' });
+      }
+
+      await db.query(
+        'INSERT INTO admins (username, password_hash, role) VALUES (?, ?, ?)',
+        [username, hashedPassword, inputRole]
+      );
+    } else {
+      return res.status(400).json({ message: 'Target është i pavlefshëm. Duhet të jetë "user" ose "admin".' });
     }
+
+    return res.status(201).json({ message: 'U regjistrua me sukses!' });
+
+  } catch (err) {
+    console.error('Register Error:', err);
+    return res.status(500).json({ message: 'Gabim serveri gjatë regjistrimit!' });
+  }
 };
 
 // 🔐 Login for both admins and users

@@ -212,3 +212,24 @@ exports.getPharmacyAdmins = async (req, res) => {
     res.status(500).json({ message: 'Gabim serveri.' });
   }
 };
+
+exports.getPharmacyList = async (req, res) => {
+  const { role, id: userId } = req.user;
+
+  try {
+    let query = `SELECT id AS pharmacy_id, name FROM pharmacies`;
+    let params = [];
+
+    // Restrict for pharmacy_admin
+    if (role === 'pharmacy_admin') {
+      query += ` WHERE pharmacy_admin_id = ?`;
+      params.push(userId);
+    }
+
+    const results = await db.query(query, params);
+    res.json(results);
+  } catch (err) {
+    console.error('Get Pharmacy List Error:', err);
+    res.status(500).json({ message: 'Gabim serveri gjatë marrjes së listës së farmacive.' });
+  }
+};
