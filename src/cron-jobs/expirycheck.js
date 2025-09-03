@@ -1,7 +1,8 @@
 const cron = require('node-cron');
 const db = require('../config/mysql');
+const { sendEmail } = require('../config/email');
 
-// Runs every day at 2:00 AM
+// Production mode: Runs daily at 2:00 AM
 cron.schedule('0 2 * * *', async () => {
   console.log('⏰ Running daily expiry check at', new Date().toISOString());
 
@@ -22,27 +23,80 @@ cron.schedule('0 2 * * *', async () => {
       );
 
       for (const product of expiring) {
-        // Avoid duplicate notification for the same product if it's already active
-        const existing = await db.query(
+        // Check if we already sent a notification for this product today
+        const today = new Date().toISOString().split('T')[0];
+        const existingNotification = await db.query(
           `SELECT * FROM notifications
-           WHERE pharmacy_id = ? AND product_id = ? AND type = 'near_expiry' AND is_resolved = FALSE`,
-          [pharmacy_id, product.pharmacy_product_id]
+           WHERE pharmacy_id = ? AND product_id = ? AND type = 'near_expiry' 
+           AND DATE(created_at) = ? AND is_resolved = FALSE`,
+          [pharmacy_id, product.pharmacy_product_id, today]
         );
 
-        if (existing.length === 0) {
-          const msg = `Produkti '${product.product_name}' skadon me ${new Date(product.expiry_date).toLocaleDateString()}.`;
+        if (existingNotification.length === 0) {
+          const msg = `Produkti '${product.product_name}' (Barkodi: ${product.barcode}) skadon me ${new Date(product.expiry_date).toLocaleDateString()}.`;
 
+          // Create notification
           await db.query(
             `INSERT INTO notifications (pharmacy_id, product_id, type, message)
              VALUES (?, ?, 'near_expiry', ?)`,
             [pharmacy_id, product.pharmacy_product_id, msg]
           );
+
+          // Send email notifications if enabled
+          await sendExpiryEmailNotifications(pharmacy_id, product);
         }
       }
     }
 
-    console.log('✅ Expiry notifications generated.');
+    console.log('✅ Expiry notifications generated successfully');
   } catch (err) {
-    console.error('❌ Cron Job Error:', err);
+    console.error('❌ Expiry check cron job error:', err);
   }
 });
+
+// Function to send expiry email notifications
+async function sendExpiryEmailNotifications(pharmacyId, product) {
+  try {
+    // Get pharmacy settings to check if email notifications are enabled
+    const [settings] = await db.query(
+      'SELECT notify_by_email FROM pharmacy_settings WHERE pharmacy_id = ?',
+      [pharmacyId]
+    );
+
+    if (!settings || !settings.notify_by_email) {
+      return; // Email notifications not enabled for this pharmacy
+    }
+
+    // Get all users with verified emails for this pharmacy
+    const users = await db.query(
+      'SELECT id, username, email FROM users WHERE pharmacy_id = ? AND email_verified = TRUE',
+      [pharmacyId]
+    );
+
+    if (users.length === 0) {
+      return; // No users with verified emails
+    }
+
+    // Calculate days until expiry
+    const expiryDate = new Date(product.expiry_date);
+    const today = new Date();
+    const daysUntilExpiry = Math.ceil((expiryDate - today) / (1000 * 60 * 60 * 24));
+
+    // Send email to each user with barcode information
+    for (const user of users) {
+      const emailResult = await sendEmail(
+        user.email,
+        'expiryAlert',
+        [product.product_name, product.barcode, product.expiry_date.toLocaleDateString(), daysUntilExpiry]
+      );
+      
+      if (!emailResult.success) {
+        console.error(`❌ Failed to send expiry email to ${user.email}:`, emailResult.error);
+      }
+    }
+
+    console.log(`📧 Sent expiry emails to ${users.length} users for product: ${product.product_name}`);
+  } catch (error) {
+    console.error('❌ Error sending expiry emails:', error);
+  }
+}

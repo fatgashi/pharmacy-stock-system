@@ -7,6 +7,7 @@ const passport = require('passport');
 
 require('./src/cron-jobs/expirycheck');
 require('./src/cron-jobs/expiredBatches');
+require('./src/cron-jobs/lowStockCheck');
 
 // Routes
 const authRoutes = require('./src/routes/auth.routes');
@@ -16,6 +17,7 @@ const saleRoutes = require('./src/routes/sale.routes');
 const usersRoutes = require('./src/routes/users.routes');
 const notificationsRoutes = require('./src/routes/notifications.routes');
 const settingsRoutes = require('./src/routes/settings.routes');
+const emailRoutes = require('./src/routes/email.routes');
 
 const app = express();
 
@@ -32,6 +34,7 @@ app.use('/api/sale', saleRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/email', emailRoutes);
 
 const httpServer = require('http').createServer(app);
 
