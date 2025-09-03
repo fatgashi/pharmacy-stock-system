@@ -18,6 +18,7 @@ const usersRoutes = require('./src/routes/users.routes');
 const notificationsRoutes = require('./src/routes/notifications.routes');
 const settingsRoutes = require('./src/routes/settings.routes');
 const emailRoutes = require('./src/routes/email.routes');
+const userManagementRoutes = require('./src/routes/userManagement.routes');
 
 const app = express();
 
@@ -35,6 +36,7 @@ app.use('/api/users', usersRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/email', emailRoutes);
+app.use('/api/user-management', userManagementRoutes);
 
 const httpServer = require('http').createServer(app);
 
