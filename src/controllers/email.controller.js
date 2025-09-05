@@ -14,7 +14,7 @@ exports.addEmailToProfile = async (req, res) => {
   }
 
   // Validate target
-  if (!['admin', 'admin'].includes(target)) {
+  if (!['admin', 'user'].includes(target)) {
     return res.status(400).json({ message: 'Targeti duhet të jetë "admin" ose "user"!' });
   }
 
