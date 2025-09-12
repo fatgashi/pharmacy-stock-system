@@ -94,6 +94,53 @@ const emailTemplates = {
       Sistemi i Menaxhimit të Farmacisë
     `
   }),
+
+  expiredBatchAlert: (productName, barcode, expiredOn, remainingQty) => ({
+    subject: 'Njoftim: Batch i Skaduar - Sistemi i Menaxhimit të Farmacisë',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #c0392b;">❗ Batch i Skaduar</h2>
+        <p>Përshëndetje,</p>
+        <p>Ky është një njoftim i automatizuar se një <strong>batch</strong> i produktit tuaj ka skaduar.</p>
+
+        <div style="background-color: #f8f9fa; padding: 20px; border-radius: 5px; margin: 20px 0;">
+          <h3 style="color: #2c3e50; margin-top: 0;">Detajet e Produktit:</h3>
+          <p><strong>Produkti:</strong> ${productName}</p>
+          <p><strong>Barkodi:</strong> ${barcode || '-'}</p>
+          <p><strong>Data e Skadimit:</strong> ${expiredOn}</p>
+          <p><strong>Sasia e Mbetur:</strong> ${remainingQty} copë</p>
+        </div>
+
+        <p>Ju lutem ndërmerrni veprimet e nevojshme (kthim, asgjësim, ose heqje nga shitja) për të respektuar rregullat e menaxhimit të barnave.</p>
+
+        <p style="color:#7f8c8d; font-size: 12px; margin-top: 24px;">
+          Ky email u dërgua automatikisht nga Sistemi i Menaxhimit të Farmacisë sapo batch-i kaloi në statusin <em>expired</em>.
+        </p>
+
+        <p>Me respekt,<br>Sistemi i Menaxhimit të Farmacisë</p>
+      </div>
+    `,
+    text: `
+      ❗ Batch i Skaduar
+
+      Përshëndetje,
+
+      Ky është një njoftim i automatizuar se një batch i produktit tuaj ka skaduar.
+
+      Detajet e Produktit:
+      - Produkti: ${productName}
+      - Barkodi: ${barcode || '-'}
+      - Data e Skadimit: ${expiredOn}
+      - Sasia e Mbetur: ${remainingQty} copë
+
+      Ju lutem ndërmerrni veprimet e nevojshme (kthim, asgjësim, ose heqje nga shitja) për të respektuar rregullat e menaxhimit të barnave.
+
+      Ky email u dërgua automatikisht nga Sistemi i Menaxhimit të Farmacisë sapo batch-i kaloi në statusin "expired".
+
+      Me respekt,
+      Sistemi i Menaxhimit të Farmacisë
+    `
+  }),
   
   expiryAlert: (productName, barcode, expiryDate, daysUntilExpiry) => ({
     subject: 'Njoftim Skadimi i Produktit - Sistemi i Menaxhimit të Farmacisë',

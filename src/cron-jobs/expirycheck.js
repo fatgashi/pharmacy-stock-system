@@ -2,101 +2,191 @@ const cron = require('node-cron');
 const db = require('../config/mysql');
 const { sendEmail } = require('../config/email');
 
-// Production mode: Runs daily at 2:00 AM
+// Runs daily at 2:00 AM server time
 cron.schedule('0 2 * * *', async () => {
-  console.log('⏰ Running daily expiry check at', new Date().toISOString());
+  console.log('⏰ Running daily near-expiry check at', new Date().toISOString());
 
   try {
-    // Get all pharmacies and their expiry settings
-    const pharmacies = await db.query(`SELECT pharmacy_id, expiry_alert_days FROM pharmacy_settings`);
+    // Pull both threshold and email toggle in one go
+    const pharmacies = await db.query(`
+      SELECT pharmacy_id, expiry_alert_days, COALESCE(notify_by_email, 0) AS notify_by_email
+      FROM pharmacy_settings
+    `);
 
-    for (const { pharmacy_id, expiry_alert_days } of pharmacies) {
-      const expiring = await db.query(
+    for (const { pharmacy_id, expiry_alert_days, notify_by_email } of pharmacies) {
+      // --- A) INITIAL STAGE: within configured window but NOT exactly day 7 ---
+      const initialCandidates = await db.query(
         `
-        SELECT pp.id AS pharmacy_product_id, pg.name AS product_name, pg.barcode, pb.expiry_date
+        SELECT 
+          pb.id AS batch_id,
+          pp.id AS pharmacy_product_id,
+          pg.name AS product_name,
+          pg.barcode,
+          pb.expiry_date,
+          DATEDIFF(pb.expiry_date, CURDATE()) AS days_left
         FROM product_batches pb
         JOIN pharmacy_products pp ON pb.pharmacy_product_id = pp.id
         JOIN products_global pg ON pp.global_product_id = pg.id
-        WHERE pb.pharmacy_id = ? AND pb.quantity > 0 AND pb.expiry_date <= DATE_ADD(CURDATE(), INTERVAL ? DAY)
+        WHERE pb.pharmacy_id = ?
+          AND pb.status = 'active'
+          AND pb.quantity > 0
+          AND pb.expiry_date >= CURDATE() -- not expired yet
+          AND DATEDIFF(pb.expiry_date, CURDATE()) BETWEEN 0 AND ?
+          AND DATEDIFF(pb.expiry_date, CURDATE()) <> 7
+        ORDER BY pb.expiry_date ASC
         `,
         [pharmacy_id, expiry_alert_days]
       );
 
-      for (const product of expiring) {
-        // Check if we already sent a notification for this product today
-        const today = new Date().toISOString().split('T')[0];
-        const existingNotification = await db.query(
-          `SELECT * FROM notifications
-           WHERE pharmacy_id = ? AND product_id = ? AND type = 'near_expiry' 
-           AND DATE(created_at) = ? AND is_resolved = FALSE`,
-          [pharmacy_id, product.pharmacy_product_id, today]
+      for (const row of initialCandidates) {
+        // Ensure we haven't already created the INITIAL notification for this batch
+        const existing = await db.query(
+          `SELECT id FROM notifications 
+           WHERE pharmacy_id = ? AND product_id = ? AND batch_id = ? AND type = 'near_expiry_initial' 
+           LIMIT 1`,
+          [pharmacy_id, row.pharmacy_product_id, row.batch_id]
         );
 
-        if (existingNotification.length === 0) {
-          const msg = `Produkti '${product.product_name}' (Barkodi: ${product.barcode}) skadon me ${new Date(product.expiry_date).toLocaleDateString()}.`;
+        if (existing.length === 0) {
+          const humanDate = new Date(row.expiry_date).toLocaleDateString();
+          const msg = `Produkti '${row.product_name}' (Barkodi: ${row.barcode || '-'}) skadon me ${row.days_left} ditë (${humanDate}).`;
 
-          // Create notification
+          // One-time notification per batch & stage
           await db.query(
-            `INSERT INTO notifications (pharmacy_id, product_id, type, message)
-             VALUES (?, ?, 'near_expiry', ?)`,
-            [pharmacy_id, product.pharmacy_product_id, msg]
+            `INSERT INTO notifications 
+               (pharmacy_id, product_id, batch_id, type, message, is_read, is_resolved, email_sent)
+             VALUES (?, ?, ?, 'near_expiry_initial', ?, FALSE, FALSE, TRUE)`,
+            [pharmacy_id, row.pharmacy_product_id, row.batch_id, msg]
           );
 
-          // Send email notifications if enabled
-          await sendExpiryEmailNotifications(pharmacy_id, product);
+          // Email (only if enabled)
+          if (notify_by_email) {
+            const users = await db.query(
+              `SELECT id, username, email 
+               FROM users 
+               WHERE pharmacy_id = ? AND email_verified = TRUE`,
+              [pharmacy_id]
+            );
+
+            if (users.length > 0) {
+              const templateArgs = [
+                row.product_name,
+                row.barcode || '-',
+                humanDate,
+                row.days_left,
+              ];
+
+              for (const user of users) {
+                try {
+                  const emailResult = await sendEmail(
+                    user.email,
+                    'expiryAlert',
+                    templateArgs
+                  );
+                  if (!emailResult?.success) {
+                    console.error(`❌ Failed to send near-expiry (initial) email to ${user.email}:`, emailResult?.error);
+                  }
+                } catch (e) {
+                  console.error(`❌ Error emailing ${user.email}:`, e);
+                }
+              }
+              console.log(`📧 Sent near-expiry (initial) emails for batch ${row.batch_id} to ${users.length} users.`);
+            }
+          }
+
+          console.log(`✅ Created INITIAL near-expiry notification for batch ${row.batch_id} (${row.product_name}).`);
+        } else {
+          // Already notified once; do nothing (no daily spam)
+          // console.log(`⏭️ Initial near-expiry already exists for batch ${row.batch_id}.`);
+        }
+      }
+
+      // --- B) 7-DAY REMINDER STAGE: always independent, exactly at 7 days left ---
+      const sevenDayCandidates = await db.query(
+        `
+        SELECT 
+          pb.id AS batch_id,
+          pp.id AS pharmacy_product_id,
+          pg.name AS product_name,
+          pg.barcode,
+          pb.expiry_date,
+          DATEDIFF(pb.expiry_date, CURDATE()) AS days_left
+        FROM product_batches pb
+        JOIN pharmacy_products pp ON pb.pharmacy_product_id = pp.id
+        JOIN products_global pg ON pp.global_product_id = pg.id
+        WHERE pb.pharmacy_id = ?
+          AND pb.status = 'active'
+          AND pb.quantity > 0
+          AND DATEDIFF(pb.expiry_date, CURDATE()) = 7
+        ORDER BY pb.expiry_date ASC
+        `,
+        [pharmacy_id]
+      );
+
+      for (const row of sevenDayCandidates) {
+        const existing7 = await db.query(
+          `SELECT id FROM notifications 
+           WHERE pharmacy_id = ? AND product_id = ? AND batch_id = ? AND type = 'near_expiry_7d' 
+           LIMIT 1`,
+          [pharmacy_id, row.pharmacy_product_id, row.batch_id]
+        );
+
+        if (existing7.length === 0) {
+          const humanDate = new Date(row.expiry_date).toLocaleDateString();
+          const msg = `Kujtesë: Produkti '${row.product_name}' (Barkodi: ${row.barcode || '-'}) skadon për 7 ditë (${humanDate}).`;
+
+          await db.query(
+            `INSERT INTO notifications 
+               (pharmacy_id, product_id, batch_id, type, message, is_read, is_resolved, email_sent)
+             VALUES (?, ?, ?, 'near_expiry_7d', ?, FALSE, FALSE, TRUE)`,
+            [pharmacy_id, row.pharmacy_product_id, row.batch_id, msg]
+          );
+
+          // Email (only if enabled)
+          if (notify_by_email) {
+            const users = await db.query(
+              `SELECT id, username, email 
+               FROM users 
+               WHERE pharmacy_id = ? AND email_verified = TRUE`,
+              [pharmacy_id]
+            );
+
+            if (users.length > 0) {
+              const templateArgs = [
+                row.product_name,
+                row.barcode || '-',
+                humanDate,
+                7, // daysUntilExpiry
+              ];
+
+              for (const user of users) {
+                try {
+                  const emailResult = await sendEmail(
+                    user.email,
+                    'expiryAlert',
+                    templateArgs
+                  );
+                  if (!emailResult?.success) {
+                    console.error(`❌ Failed to send 7-day reminder email to ${user.email}:`, emailResult?.error);
+                  }
+                } catch (e) {
+                  console.error(`❌ Error emailing ${user.email}:`, e);
+                }
+              }
+              console.log(`📧 Sent 7-day reminder emails for batch ${row.batch_id} to ${users.length} users.`);
+            }
+          }
+
+          console.log(`✅ Created 7-DAY near-expiry reminder for batch ${row.batch_id} (${row.product_name}).`);
+        } else {
+          // Already sent the 7-day reminder once; no repeat
+          // console.log(`⏭️ 7-day reminder already exists for batch ${row.batch_id}.`);
         }
       }
     }
 
-    console.log('✅ Expiry notifications generated successfully');
+    console.log('✅ Near-expiry notifications processed successfully');
   } catch (err) {
-    console.error('❌ Expiry check cron job error:', err);
+    console.error('❌ Near-expiry cron error:', err);
   }
 });
-
-// Function to send expiry email notifications
-async function sendExpiryEmailNotifications(pharmacyId, product) {
-  try {
-    // Get pharmacy settings to check if email notifications are enabled
-    const [settings] = await db.query(
-      'SELECT notify_by_email FROM pharmacy_settings WHERE pharmacy_id = ?',
-      [pharmacyId]
-    );
-
-    if (!settings || !settings.notify_by_email) {
-      return; // Email notifications not enabled for this pharmacy
-    }
-
-    // Get all users with verified emails for this pharmacy
-    const users = await db.query(
-      'SELECT id, username, email FROM users WHERE pharmacy_id = ? AND email_verified = TRUE',
-      [pharmacyId]
-    );
-
-    if (users.length === 0) {
-      return; // No users with verified emails
-    }
-
-    // Calculate days until expiry
-    const expiryDate = new Date(product.expiry_date);
-    const today = new Date();
-    const daysUntilExpiry = Math.ceil((expiryDate - today) / (1000 * 60 * 60 * 24));
-
-    // Send email to each user with barcode information
-    for (const user of users) {
-      const emailResult = await sendEmail(
-        user.email,
-        'expiryAlert',
-        [product.product_name, product.barcode, product.expiry_date.toLocaleDateString(), daysUntilExpiry]
-      );
-      
-      if (!emailResult.success) {
-        console.error(`❌ Failed to send expiry email to ${user.email}:`, emailResult.error);
-      }
-    }
-
-    console.log(`📧 Sent expiry emails to ${users.length} users for product: ${product.product_name}`);
-  } catch (error) {
-    console.error('❌ Error sending expiry emails:', error);
-  }
-}

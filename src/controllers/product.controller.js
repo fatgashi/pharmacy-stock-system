@@ -65,7 +65,7 @@ exports.getProductByBarcode = async (req, res) => {
 
     try {
       const result = await db.query(
-        `SELECT pg.*, pp.quantity, pp.price, pp.expiry_date
+        `SELECT pg.*, pp.quantity, pp.id AS pharmacy_product_id, pp.price, pp.expiry_date
         FROM products_global pg
         JOIN pharmacy_products pp ON pp.global_product_id = pg.id
         WHERE pg.barcode = ? AND pp.pharmacy_id = ?`,
@@ -105,7 +105,7 @@ exports.listPharmacyProducts = async (req, res) => {
 
   try {
     let query = `
-      SELECT pg.*, pp.quantity, pp.price, pp.expiry_date
+      SELECT pg.*, pp.quantity, pp.id AS pharmacy_product_id, pp.price, pp.expiry_date
       FROM products_global pg
       JOIN pharmacy_products pp ON pp.global_product_id = pg.id
       WHERE pp.pharmacy_id = ?
@@ -148,9 +148,11 @@ exports.addStockByBarcode = async (req, res) => {
   }
 
   try {
-    // 🔍 Find pharmacy product
+    // 🔍 Find pharmacy product + current qty
     const [result] = await db.query(
-      `SELECT pp.id AS pharmacy_product_id, pp.quantity AS current_quantity
+      `SELECT 
+         pp.id   AS pharmacy_product_id, 
+         pp.quantity AS current_quantity
        FROM products_global pg
        JOIN pharmacy_products pp ON pg.id = pp.global_product_id
        WHERE pg.barcode = ? AND pp.pharmacy_id = ?`,
@@ -162,45 +164,96 @@ exports.addStockByBarcode = async (req, res) => {
     }
 
     const { pharmacy_product_id, current_quantity } = result;
+    const newQuantity = Number(current_quantity) + Number(quantity);
 
-    // ➕ Insert new batch
+    // ⚙️ Get low-stock settings for resolution/hysteresis
+    const [settings] = await db.query(
+      `SELECT COALESCE(low_stock_threshold, 0) AS low_stock_threshold 
+         FROM pharmacy_settings 
+        WHERE pharmacy_id = ?`,
+      [pharmacy_id]
+    );
+    const low_stock_threshold = settings?.low_stock_threshold ?? 0;
+    const buffer = Math.max(1, Math.ceil(low_stock_threshold * 0.10));
+    const resolveQty = low_stock_threshold + buffer;
+
+    // ➕ Insert new batch (ensure status 'active' if your default isn't set)
     await db.query(
-      `INSERT INTO product_batches (pharmacy_id, pharmacy_product_id, quantity, expiry_date)
-       VALUES (?, ?, ?, ?)`,
+      `INSERT INTO product_batches (pharmacy_id, pharmacy_product_id, quantity, expiry_date, status)
+       VALUES (?, ?, ?, ?, 'active')`,
       [pharmacy_id, pharmacy_product_id, quantity, expiry_date]
     );
 
-    // 🔄 Prepare update fields
+    // 🔄 Build product update (qty, optional price)
     const updateFields = [`quantity = quantity + ?`];
     const updateParams = [quantity];
 
-    // 🔄 Update price if requested
     if (update_price === true && price) {
       updateFields.push(`price = ?`);
       updateParams.push(price);
     }
 
-    // ✅ If current quantity is 0, update expiry date to this batch's date
-    if (current_quantity === 0) {
-      updateFields.push(`expiry_date = ?`);
-      updateParams.push(expiry_date);
-    }
-
     updateParams.push(pharmacy_product_id);
 
-    // 🔄 Update the pharmacy_products table
     await db.query(
       `UPDATE pharmacy_products SET ${updateFields.join(', ')} WHERE id = ?`,
       updateParams
     );
 
-    // ✅ Resolve any unresolved low stock notifications for this product
-    await db.query(
-      `UPDATE notifications
-       SET is_resolved = TRUE
-       WHERE pharmacy_id = ? AND product_id = ? AND type = 'low_stock' AND is_resolved = FALSE`,
+    // ♻️ Recalculate product's "next expiry" snapshot from batches (always)
+    const [nextExp] = await db.query(
+      `SELECT MIN(expiry_date) AS next_expiry
+         FROM product_batches
+        WHERE pharmacy_id = ?
+          AND pharmacy_product_id = ?
+          AND status = 'active'
+          AND quantity > 0`,
       [pharmacy_id, pharmacy_product_id]
     );
+
+    await db.query(
+      `UPDATE pharmacy_products
+          SET expiry_date = ?
+        WHERE id = ?`,
+      [nextExp?.next_expiry || null, pharmacy_product_id]
+    );
+
+    // ✅ Resolve / ensure notifications (product-level, batch_id = 0)
+    // 1) If product was out of stock and now has >0 → resolve OUT_OF_STOCK
+    if (current_quantity === 0 && newQuantity > 0) {
+      await db.query(
+        `UPDATE notifications
+            SET is_resolved = TRUE, resolved_at = NOW()
+          WHERE pharmacy_id = ? AND product_id = ? 
+            AND type = 'out_of_stock' AND is_resolved = FALSE AND batch_id = 0`,
+        [pharmacy_id, pharmacy_product_id]
+      );
+    }
+
+    // 2) Low-stock resolution/ensure logic with hysteresis
+    if (newQuantity >= resolveQty) {
+      // Fully recovered → resolve LOW_STOCK if any
+      await db.query(
+        `UPDATE notifications
+            SET is_resolved = TRUE, resolved_at = NOW()
+          WHERE pharmacy_id = ? AND product_id = ?
+            AND type = 'low_stock' AND is_resolved = FALSE AND batch_id = 0`,
+        [pharmacy_id, pharmacy_product_id]
+      );
+    } else if (newQuantity > 0 && newQuantity <= low_stock_threshold) {
+      // Still low → ensure there is an active low_stock (no email here)
+      const msg = `Produkti është në stok të ulët (${newQuantity} copë). Pragu: ${low_stock_threshold} copë.`;
+      await db.query(
+        `INSERT INTO notifications
+           (pharmacy_id, product_id, batch_id, type, message, is_read, is_resolved, email_sent)
+         VALUES (?, ?, 0, 'low_stock', ?, FALSE, FALSE, 0)
+         ON DUPLICATE KEY UPDATE message = VALUES(message)`,
+        [pharmacy_id, pharmacy_product_id, msg]
+      );
+    } else {
+      // newQuantity is >0 but below resolveQty and above threshold → no action needed
+      // (low_stock not active; out_of_stock already resolved above if applicable)
+    }
 
     res.status(200).json({ message: 'Stoku i ri u shtua me sukses përmes barkodit!' });
   } catch (err) {
@@ -218,40 +271,82 @@ exports.markBatchStatus = async (req, res) => {
     return res.status(400).json({ message: 'Status i pavlefshëm!' });
   }
 
+  let conn;
   try {
-    // Allow batch regardless of expiry, but make sure it exists and has quantity
-    const [batch] = await db.query(
-      `SELECT quantity, pharmacy_product_id, status FROM product_batches
-       WHERE id = ? AND pharmacy_id = ? AND quantity > 0`,
+    conn = await db.getConnection();        // mysql2/promise pool
+    await conn.beginTransaction();
+
+    // Lock the batch row so quantity/expiry math is consistent
+    const [rows] = await conn.query(
+      `SELECT id, quantity, pharmacy_product_id, status
+         FROM product_batches
+        WHERE id = ? AND pharmacy_id = ? AND quantity > 0
+        FOR UPDATE`,
       [id, pharmacy_id]
     );
 
+    const batch = rows[0];
     if (!batch) {
+      await conn.rollback();
       return res.status(404).json({ message: 'Batch nuk u gjet ose nuk ka sasi për përpunim!' });
     }
 
     if (['disposed', 'returned'].includes(batch.status)) {
+      await conn.rollback();
       return res.status(400).json({ message: 'Ky batch është trajtuar më parë!' });
     }
 
-    // 1. Update batch status (you can optionally save `reason`)
-    await db.query(
-      `UPDATE product_batches SET status = ?, updated_at = NOW() WHERE id = ?`,
-      [status, id]
+    // 1) Update batch status (+ optional reason)
+    await conn.query(
+      `UPDATE product_batches
+          SET status = ?, reason = ?, updated_at = NOW()
+        WHERE id = ?`,
+      [status, reason || null, id]
     );
 
-    // 2. Decrease total quantity in pharmacy_products
-    await db.query(
+    // 2) Decrease total quantity on the product safely (no negatives)
+    await conn.query(
       `UPDATE pharmacy_products
-       SET quantity = quantity - ?
-       WHERE id = ? AND pharmacy_id = ?`,
+          SET quantity = GREATEST(quantity - ?, 0)
+        WHERE id = ? AND pharmacy_id = ?`,
       [batch.quantity, batch.pharmacy_product_id, pharmacy_id]
     );
 
-    res.status(200).json({ message: `Batch u shënua si "${status}". Stoku u përditësua.` });
+    // 3) Recompute product expiry from remaining usable batches
+    //    (keeps only batches with stock, not disposed/returned, and with a real future/now expiry)
+    const [nextRows] = await conn.query(
+      `SELECT MIN(expiry_date) AS next_expiry
+         FROM product_batches
+        WHERE pharmacy_id = ?
+          AND pharmacy_product_id = ?
+          AND quantity > 0
+          AND status NOT IN ('disposed','returned')
+          AND expiry_date IS NOT NULL
+          AND expiry_date >= CURDATE()`,
+      [pharmacy_id, batch.pharmacy_product_id]
+    );
+
+    const nextExpiry = nextRows[0]?.next_expiry || batch.expiry_date;
+
+    await conn.query(
+      `UPDATE pharmacy_products
+          SET expiry_date = ?
+        WHERE id = ? AND pharmacy_id = ?`,
+      [nextExpiry, batch.pharmacy_product_id, pharmacy_id]
+    );
+
+    await conn.commit();
+
+    return res.status(200).json({
+      message: `Batch u shënua si "${status}". Stoku u përditësua.`,
+      next_expiry: nextExpiry, // optional: handy for UI
+    });
   } catch (err) {
+    if (conn) await conn.rollback();
     console.error('Mark Batch Error:', err);
-    res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error' });
+  } finally {
+    if (conn) conn.release();
   }
 };
 
