@@ -172,11 +172,17 @@ exports.updateDayOffStatus = async (req, res) => {
     }
 
     if (type === 'admin' && role === 'pharmacy_admin') {
-      const [pharmacy] = await db.query(
-        `SELECT id FROM pharmacies WHERE pharmacy_admin_id = ?`,
-        [userId]
+      const allowed = await db.query(
+        `SELECT 1 AS ok
+           FROM pharmacies
+          WHERE pharmacy_admin_id = ?
+            AND id = ?
+          LIMIT 1`,
+        [userId, dayOff.pharmacy_id]
       );
-      if (!pharmacy || pharmacy.id !== dayOff.pharmacy_id) {
+  
+    
+      if (!Array.isArray(allowed) || allowed.length === 0) {
         return res.status(403).json({ message: 'Nuk keni autorizim për këtë farmaci.' });
       }
     }
