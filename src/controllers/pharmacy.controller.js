@@ -3,34 +3,82 @@ const { safeBody } = require('../helpers/safeBody');
 
 // Add a new pharmacy (admin only)
 exports.addPharmacy = async (req, res) => {
-    const { name, address, phone, pharmacy_admin_id } = safeBody(req);
+  const { name, address, phone } = safeBody(req);
+  const { id: actorId, type, role } = req.user; // expect { id, type: 'admin'|'user', role: 'admin'|'pharmacy_admin'|... }
+  let { pharmacy_admin_id } = safeBody(req);     // may be ignored for pharmacy_admin role
 
-    if (!name || !pharmacy_admin_id) {
-      return res.status(400).json({ message: 'Name dhe pharmacy_admin_id jane te kerkuara!' });
+  // Only admins can create pharmacies
+  if (type !== 'admin') {
+    return res.status(403).json({ message: 'Lejohet vetëm për adminët.' });
+  }
+
+  // Determine final owner (pharmacy_admin)
+  let ownerId;
+  if (role === 'pharmacy_admin') {
+    // A pharmacy_admin can only create for themselves
+    ownerId = actorId;
+  } else {
+    // Global/system admins must provide the target pharmacy_admin_id
+    if (!pharmacy_admin_id) {
+      return res.status(400).json({ message: 'pharmacy_admin_id është i detyrueshëm për këtë veprim.' });
+    }
+    ownerId = Number(pharmacy_admin_id);
+  }
+
+  if (!name) {
+    return res.status(400).json({ message: 'Name është i detyrueshëm.' });
+  }
+
+  let conn;
+  try {
+    // 1) Verify the owner exists and is a pharmacy_admin
+    const admins = await db.query(
+      'SELECT id FROM admins WHERE id = ? AND role = ?',
+      [ownerId, 'pharmacy_admin']
+    );
+    if (!admins || admins.length === 0) {
+      return res.status(404).json({ message: 'Pharmacy admin nuk u gjete.' });
     }
 
-    try {
-      // Check if pharmacy_admin exists and has correct role
-      const result = await db.query(
-        'SELECT * FROM admins WHERE id = ? AND role = ?',
-        [pharmacy_admin_id, 'pharmacy_admin']
-      );
+    // 2) Begin transaction on a single connection
+    conn = await db.getConnection();            // mysql2/promise pool connection
+    await conn.beginTransaction();
 
-      if (result.length === 0) {
-        return res.status(404).json({ message: 'Pharmacy admin nuk u gjete' });
-      }
-
-      // Insert new pharmacy
-      await db.query(
-        'INSERT INTO pharmacies (pharmacy_admin_id, name, address, phone) VALUES (?, ?, ?, ?)',
-        [pharmacy_admin_id, name, address || '', phone || '']
-      );
-
-      res.status(201).json({ message: 'Pharmacy u krijua me sukses!' });
-    } catch (err) {
-      console.error('Add Pharmacy Error:', err);
-      res.status(500).json({ message: 'Server error' });
+    // 3) Insert pharmacy (use the same connection!)
+    const [ins] = await conn.query(
+      'INSERT INTO pharmacies (pharmacy_admin_id, name, address, phone) VALUES (?, ?, ?, ?)',
+      [ownerId, name, address || '', phone || '']
+    );
+    const pharmacyId = ins.insertId;
+    if (!pharmacyId) {
+      await conn.rollback();
+      throw new Error('insertId not returned for pharmacies insert');
     }
+
+    // 4) Insert default settings for this pharmacy (same connection)
+    // defaults: threshold=20, expiry_alert_days=30, email=false(0), dashboard=true(1), coupon=false(0)
+    await conn.query(
+      `INSERT INTO pharmacy_settings
+         (pharmacy_id, low_stock_threshold, expiry_alert_days, notify_by_email, notify_by_dashboard, coupon)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [pharmacyId, 20, 30, 0, 1, 0]
+    );
+
+    // 5) Commit
+    await conn.commit();
+
+    return res.status(201).json({
+      success: true,
+      message: 'Pharmacy u krijua me sukses!',
+      pharmacy_id: pharmacyId
+    });
+  } catch (err) {
+    if (conn) await conn.rollback();
+    console.error('Add Pharmacy Error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  } finally {
+    if (conn) conn.release();
+  }
 };
 
 exports.getPharmacies = async (req, res) => {

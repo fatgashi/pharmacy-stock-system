@@ -23,7 +23,7 @@ exports.getPharmacySettings = async (req, res) => {
 
 // PUT /api/pharmacy/settings
 exports.updatePharmacySettings = async (req, res) => {
-  const { low_stock_threshold, expiry_alert_days, notify_by_email, notify_by_dashboard } = safeBody(req);
+  const { low_stock_threshold, expiry_alert_days, notify_by_email, notify_by_dashboard, coupon } = safeBody(req);
   const { pharmacy_id } = req.user;
 
   // 🔍 Check if at least one field is provided
@@ -31,7 +31,8 @@ exports.updatePharmacySettings = async (req, res) => {
     low_stock_threshold == null &&
     expiry_alert_days == null &&
     notify_by_email == null &&
-    notify_by_dashboard == null
+    notify_by_dashboard == null &&
+    coupon == null
   ) {
     return res.status(400).json({ success: false, message: 'Të paktën një fushë duhet të jepet për përditësim!' });
   }
@@ -63,6 +64,11 @@ exports.updatePharmacySettings = async (req, res) => {
       values.push(notify_by_dashboard);
     }
 
+    if (coupon != null) {
+      fields.push('coupon = ?');
+      values.push(coupon);
+    }
+
     if (existing.length > 0) {
       // Existing settings → update only the changed fields
       const sql = `UPDATE pharmacy_settings SET ${fields.join(', ')} WHERE pharmacy_id = ?`;
@@ -72,13 +78,14 @@ exports.updatePharmacySettings = async (req, res) => {
       // New settings → insert, filling in missing values with defaults
       await db.query(
         `INSERT INTO pharmacy_settings (pharmacy_id, low_stock_threshold, expiry_alert_days, notify_by_email, notify_by_dashboard)
-         VALUES (?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?)`,
         [
           pharmacy_id,
           low_stock_threshold ?? 10,
           expiry_alert_days ?? 30,
           notify_by_email ?? false,
-          notify_by_dashboard ?? true
+          notify_by_dashboard ?? true,
+          coupon ?? false
         ]
       );
     }
