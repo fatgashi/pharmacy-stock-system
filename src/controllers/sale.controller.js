@@ -65,11 +65,23 @@ const { safeBody } = require('../helpers/safeBody');
 exports.confirmSale = async (req, res) => {
   let connection;
 
-  const { items, amount_given } = safeBody(req);
+  const { items, amount_given, description } = safeBody(req);
   const { pharmacy_id, id: user_id } = req.user;
 
   if (!items || !Array.isArray(items) || items.length === 0 || amount_given == null) {
     return res.status(400).json({ message: 'Invalid cart or amount' });
+  }
+
+  // Normalize/limit optional description
+  let saleDescription = null;
+  if (typeof description === 'string') {
+    const trimmed = description.trim();
+    if (trimmed.length > 0) {
+      if (trimmed.length > 2000) {
+        return res.status(400).json({ message: 'Përshkrimi është shumë i gjatë (max 2000 karaktere).' });
+      }
+      saleDescription = trimmed;
+    }
   }
 
   try {
@@ -98,8 +110,8 @@ exports.confirmSale = async (req, res) => {
 
       const [batchRows] = await connection.query(
         `SELECT * FROM product_batches
-        WHERE pharmacy_product_id = ? AND pharmacy_id = ? AND quantity > 0 AND status = 'active'
-        ORDER BY expiry_date ASC`,
+         WHERE pharmacy_product_id = ? AND pharmacy_id = ? AND quantity > 0 AND status = 'active'
+         ORDER BY expiry_date ASC`,
         [product.pharmacy_product_id, pharmacy_id]
       );
 
@@ -108,10 +120,8 @@ exports.confirmSale = async (req, res) => {
 
       for (const batch of batchRows) {
         if (remainingQty <= 0) break;
-
         const usedQty = Math.min(batch.quantity, remainingQty);
         remainingQty -= usedQty;
-
         batchUpdates.push({ batch_id: batch.id, usedQty });
       }
 
@@ -141,17 +151,18 @@ exports.confirmSale = async (req, res) => {
       return res.status(400).json({ message: 'Pagesa nuk perputhet me qmimin e barnave!' });
     }
 
+    // ⬇️ Include description in the sales insert
     const [saleInsert] = await connection.query(
-      `INSERT INTO sales (pharmacy_id, user_id, total, amount_given, change_given)
-       VALUES (?, ?, ?, ?, ?)`,
-      [pharmacy_id, user_id, total, amount_given, change]
+      `INSERT INTO sales (pharmacy_id, user_id, total, amount_given, change_given, description)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [pharmacy_id, user_id, total, amount_given, change, saleDescription]
     );
     const sale_id = saleInsert.insertId;
 
     for (const item of saleItems) {
       await connection.query(
         `INSERT INTO sale_items (sale_id, product_barcode, product_name, quantity, price, subtotal)
-        VALUES (?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?)`,
         [sale_id, item.barcode, item.name, item.quantity, item.price, item.subtotal]
       );
 
@@ -159,8 +170,8 @@ exports.confirmSale = async (req, res) => {
       for (const { batch_id, usedQty } of item.batchUpdates) {
         await connection.query(
           `UPDATE product_batches
-          SET quantity = quantity - ?
-          WHERE id = ? AND pharmacy_id = ?`,
+           SET quantity = quantity - ?
+           WHERE id = ? AND pharmacy_id = ?`,
           [usedQty, batch_id, pharmacy_id]
         );
       }
@@ -168,18 +179,18 @@ exports.confirmSale = async (req, res) => {
       // 🔁 Update total stock in pharmacy_products
       await connection.query(
         `UPDATE pharmacy_products
-        SET quantity = quantity - ?
-        WHERE id = ?`,
+         SET quantity = quantity - ?
+         WHERE id = ?`,
         [item.quantity, item.pharmacy_product_id]
       );
 
-      // ✅ Update expiry_date based on next available batch (after batch updates)
+      // ✅ Update expiry_date based on next available batch
       const [remainingBatches] = await connection.query(
         `SELECT expiry_date
-        FROM product_batches
-        WHERE pharmacy_product_id = ? AND pharmacy_id = ? AND quantity > 0
-        ORDER BY expiry_date ASC
-        LIMIT 1`,
+         FROM product_batches
+         WHERE pharmacy_product_id = ? AND pharmacy_id = ? AND quantity > 0
+         ORDER BY expiry_date ASC
+         LIMIT 1`,
         [item.pharmacy_product_id, pharmacy_id]
       );
 
@@ -187,8 +198,8 @@ exports.confirmSale = async (req, res) => {
         const newExpiry = remainingBatches[0].expiry_date;
         await connection.query(
           `UPDATE pharmacy_products
-          SET expiry_date = ?
-          WHERE id = ?`,
+           SET expiry_date = ?
+           WHERE id = ?`,
           [newExpiry, item.pharmacy_product_id]
         );
       }
@@ -198,29 +209,25 @@ exports.confirmSale = async (req, res) => {
         `SELECT low_stock_threshold FROM pharmacy_settings WHERE pharmacy_id = ?`,
         [pharmacy_id]
       );
-
       const lowStockThreshold = settingsRows[0]?.low_stock_threshold || 10;
 
       const [currentStockRows] = await connection.query(
         `SELECT quantity FROM pharmacy_products WHERE id = ?`,
         [item.pharmacy_product_id]
       );
-
       const currentQty = currentStockRows[0]?.quantity || 0;
 
       if (currentQty <= lowStockThreshold) {
-        // Check if unresolved notification already exists
         const [existingNotifs] = await connection.query(
           `SELECT id FROM notifications
-          WHERE pharmacy_id = ? AND product_id = ? AND type = 'low_stock' AND is_resolved = FALSE`,
+           WHERE pharmacy_id = ? AND product_id = ? AND type = 'low_stock' AND is_resolved = FALSE`,
           [pharmacy_id, item.pharmacy_product_id]
         );
 
         if (existingNotifs.length === 0) {
-          // Insert new notification
           await connection.query(
             `INSERT INTO notifications (pharmacy_id, product_id, type, message)
-            VALUES (?, ?, 'low_stock', ?)`,
+             VALUES (?, ?, 'low_stock', ?)`,
             [
               pharmacy_id,
               item.pharmacy_product_id,
@@ -238,6 +245,7 @@ exports.confirmSale = async (req, res) => {
       sale_id,
       total: total.toFixed(2),
       change: change.toFixed(2),
+      description: saleDescription || null,  // ⬅️ echo back
       items: saleItems.map(i => ({
         barcode: i.barcode,
         name: i.name,
@@ -247,11 +255,11 @@ exports.confirmSale = async (req, res) => {
       }))
     });
   } catch (err) {
-      if (connection) await connection.rollback();
-      console.error('Sale Confirm Error:', err);
-      res.status(500).json({ message: 'Server error' });
+    if (connection) await connection.rollback();
+    console.error('Sale Confirm Error:', err);
+    res.status(500).json({ message: 'Server error' });
   } finally {
-     if (connection) connection.release();
+    if (connection) connection.release();
   }
 };
 
