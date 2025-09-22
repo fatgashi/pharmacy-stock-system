@@ -6,7 +6,7 @@ exports.getPharmacySettings = async (req, res) => {
 
   try {
     const settings = await db.query(
-      'SELECT low_stock_threshold, expiry_alert_days, notify_by_email, notify_by_dashboard FROM pharmacy_settings WHERE pharmacy_id = ?',
+      'SELECT low_stock_threshold, expiry_alert_days, notify_by_email, notify_by_dashboard, coupon FROM pharmacy_settings WHERE pharmacy_id = ?',
       [pharmacy_id]
     );
 
