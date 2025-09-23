@@ -225,7 +225,7 @@ exports.listPharmacyProducts = async (req, res) => {
 
   try {
     let query = `
-      SELECT pg.*, pp.quantity, pp.id AS pharmacy_product_id, pp.price, pp.expiry_date
+      SELECT pg.*, pp.quantity, pp.id AS pharmacy_product_id, pp.custom_name, pp.price, pp.expiry_date
       FROM products_global pg
       JOIN pharmacy_products pp ON pp.global_product_id = pg.id
       WHERE pp.pharmacy_id = ?
@@ -598,5 +598,47 @@ exports.editBatch = async (req, res) => {
   } catch (err) {
     console.error('Edit Batch Error:', err);
     res.status(500).json({ message: 'Gabim serveri.' });
+  }
+};
+
+exports.updateProductMeta = async (req, res) => {
+  const { id } = req.params; // pharmacy_products.id
+  const { pharmacy_id } = req.user;
+  const { custom_name, price } = safeBody(req);
+
+  if (custom_name == null && price == null) {
+    return res.status(400).json({ message: 'S’ka asgjë për përditësim.' });
+  }
+
+  try {
+    const rows = await db.query(
+      `SELECT id FROM pharmacy_products WHERE id = ? AND pharmacy_id = ? LIMIT 1`,
+      [id, pharmacy_id]
+    );
+    if (!rows[0]) return res.status(404).json({ message: 'Produkti nuk u gjet.' });
+
+    const fields = [];
+    const params = [];
+    if (custom_name != null) { fields.push('custom_name = ?'); params.push(custom_name); }
+    if (price != null)       { fields.push('price = ?');       params.push(Number(price)); }
+
+    params.push(id, pharmacy_id);
+
+    await db.query(
+      `UPDATE pharmacy_products SET ${fields.join(', ')}, updated_at = NOW()
+        WHERE id = ? AND pharmacy_id = ?`,
+      params
+    );
+
+    const updated = await db.query(
+      `SELECT id, pharmacy_id, global_product_id, custom_name, quantity, price, expiry_date
+         FROM pharmacy_products WHERE id = ? AND pharmacy_id = ?`,
+      [id, pharmacy_id]
+    );
+
+    return res.json({ message: 'Produkti u përditësua.', data: updated[0] });
+  } catch (err) {
+    console.error('Update Product Meta Error:', err);
+    return res.status(500).json({ message: 'Gabim serveri.' });
   }
 };

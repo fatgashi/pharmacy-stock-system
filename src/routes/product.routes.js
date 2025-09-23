@@ -25,4 +25,6 @@ router.get('/expired', authorizeRole("user"), productController.getExpiredProduc
 
 router.put('/batch/:id/edit', authorizeRole("user"), productController.editBatch);
 
+router.patch('/edit-product/:id', authorizeRole("user"), productController.updateProductMeta);
+
 module.exports = router;
