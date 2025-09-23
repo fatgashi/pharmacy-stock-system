@@ -11,6 +11,8 @@ router.use(authenticateJWT);
 router.post('/add', authorizeRole("user"), productController.addProductToPharmacy);
 router.post('/add-batch', authorizeRole("user"), productController.addStockByBarcode);
 
+router.get('/:id/details', authorizeRole("user"), productController.getProductDetails);
+
 // Search by barcode (for scanner)
 router.get('/barcode/:barcode', authorizeRole("user"), productController.getProductByBarcode);
 

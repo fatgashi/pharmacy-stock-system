@@ -58,6 +58,126 @@ exports.addProductToPharmacy = async (req, res) => {
   }
 };
 
+exports.getProductDetails = async (req, res) => {
+  const { id } = req.params; // pharmacy_products.id
+  const { pharmacy_id } = req.user;
+
+  // Query params
+  const includeEmpty = String(req.query.includeEmpty || 'false').toLowerCase() === 'true';
+  const orderByRaw = (req.query.orderBy || 'expiry_date').toLowerCase();
+  const orderRaw   = (req.query.order || 'asc').toLowerCase();
+  let   page       = parseInt(req.query.page, 10) || 1;
+  let   limit      = parseInt(req.query.limit, 10) || 20;
+
+  // Safety: clamp pagination + whitelist sort
+  if (page < 1) page = 1;
+  if (limit < 1) limit = 1;
+  if (limit > 100) limit = 100;
+
+  const allowedOrderBy = new Set(['expiry_date', 'created_at']);
+  const orderBy = allowedOrderBy.has(orderByRaw) ? orderByRaw : 'expiry_date';
+
+  const order = (orderRaw === 'desc') ? 'DESC' : 'ASC';
+
+  const offset = (page - 1) * limit;
+
+  try {
+    // 1) Product (with global name)
+    const productRows = await db.query(
+      `SELECT 
+          pp.id,
+          pp.pharmacy_id,
+          pp.global_product_id,
+          pg.name AS global_name,
+          pp.custom_name,
+          pp.quantity,
+          pp.price,
+          pp.expiry_date
+       FROM pharmacy_products pp
+       JOIN products_global pg ON pg.id = pp.global_product_id
+       WHERE pp.id = ? AND pp.pharmacy_id = ?
+       LIMIT 1`,
+      [id, pharmacy_id]
+    );
+
+    const product = productRows[0];
+    if (!product) {
+      return res.status(404).json({ message: 'Produkti nuk u gjet.' });
+    }
+
+    // 2) Build WHERE for batches
+    let where = `WHERE pharmacy_product_id = ? AND pharmacy_id = ?`;
+    const params = [id, pharmacy_id];
+
+    if (!includeEmpty) {
+      where += ` AND quantity > 0`;
+    }
+
+    // 3) Total count (for pagination)
+    const countRows = await db.query(
+      `SELECT COUNT(*) AS total FROM product_batches ${where}`,
+      params
+    );
+    const total = Number(countRows[0]?.total || 0);
+
+    // 4) Batches listing (active first, then by chosen field, NULLS LAST)
+    // We keep active first for usability; adjust if you ever want otherwise.
+    const batches = await db.query(
+      `
+      SELECT 
+          id, pharmacy_product_id, quantity, expiry_date, status, created_at, updated_at
+      FROM product_batches
+      ${where}
+      ORDER BY 
+          CASE WHEN status = 'active' THEN 0 ELSE 1 END,
+          ${orderBy} IS NULL,        -- push NULLs last
+          ${orderBy} ${order},
+          id ASC
+      LIMIT ? OFFSET ?
+      `,
+      [...params, limit, offset]
+    );
+
+    // 5) Quick aggregate sanity (sum active quantities across *all* batches)
+    //    Note: This ignores pagination—intentionally, to compare against product.quantity.
+    const activeAggRows = await db.query(
+      `
+      SELECT COALESCE(SUM(quantity), 0) AS active_qty
+      FROM product_batches
+      WHERE pharmacy_product_id = ? AND pharmacy_id = ? AND status = 'active'
+      `,
+      [id, pharmacy_id]
+    );
+    const activeQty = Number(activeAggRows[0]?.active_qty || 0);
+
+    return res.json({
+      data: {
+        product,
+        batches,
+        aggregates: {
+          activeQuantity: activeQty,
+          productQuantity: Number(product.quantity || 0),
+          mismatch: activeQty !== Number(product.quantity || 0)
+        }
+      },
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit) || 1
+      },
+      query: {
+        includeEmpty,
+        orderBy,
+        order
+      }
+    });
+  } catch (err) {
+    console.error('Get Product Details Error:', err);
+    return res.status(500).json({ message: 'Gabim serveri.' });
+  }
+};
+
 // Search by barcode (scanner)
 exports.getProductByBarcode = async (req, res) => {
     const { barcode } = req.params;
