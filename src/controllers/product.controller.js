@@ -58,6 +58,25 @@ exports.addProductToPharmacy = async (req, res) => {
   }
 };
 
+exports.getProductFromGlobal = async (req, res) => {
+  const { barcode } = req.params;
+  
+  try {
+    const [product] = await db.query(
+      `SELECT * FROM products_global WHERE barcode = ?`,
+      [barcode]
+    );
+    if (!product) {
+      return res.status(404).json({success: false, message: 'Produkti nuk u gjet.'});
+    }
+    
+    res.json(product);
+  } catch (err) {
+    console.error('Get Product From Global Error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+}
+
 exports.getProductDetails = async (req, res) => {
   const { id } = req.params; // pharmacy_products.id
   const { pharmacy_id } = req.user;

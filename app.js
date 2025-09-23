@@ -20,6 +20,7 @@ const settingsRoutes = require('./src/routes/settings.routes');
 const emailRoutes = require('./src/routes/email.routes');
 const userManagementRoutes = require('./src/routes/userManagement.routes');
 const dashboardRoutes = require('./src/routes/dashboard.routes');
+const batchRoutes = require('./src/routes/batch.routes');
 
 const app = express();
 
@@ -39,6 +40,7 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/email', emailRoutes);
 app.use('/api/user-management', userManagementRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/batch', batchRoutes);
 
 const httpServer = require('http').createServer(app);
 
