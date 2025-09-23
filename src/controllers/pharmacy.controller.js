@@ -216,34 +216,47 @@ exports.updatePharmacy = async (req, res) => {
 };
 
 exports.getPharmacyById = async (req, res) => {
-  const { id } = req.params;
-  const { type, role, id: requesterId } = req.user;
+  const { id } = req.params; // pharmacy id from route
+  const {
+    id: requesterId,
+    role,           
+    type,
+    pharmacy_id: userPharmacyId
+  } = req.user;
 
   try {
-    // Check access
-    if (type !== 'admin' || (role !== 'admin' && role !== 'pharmacy_admin')) {
-      return res.status(403).json({ message: 'Nuk keni autorizim për këtë veprim.' });
-    }
-
+    // Base query
     let query = `SELECT * FROM pharmacies WHERE id = ?`;
     let params = [id];
 
-    // If pharmacy_admin, limit to their own pharmacies
+    // RBAC
     if (role === 'pharmacy_admin') {
+      // Can only access pharmacies they own
       query += ` AND pharmacy_admin_id = ?`;
       params.push(requesterId);
+    } else if (role === 'user' || type === 'user') {
+      // Must match the pharmacy assigned to the user
+      if (!userPharmacyId) {
+        return res.status(403).json({ message: 'Nuk keni farmaci të caktuar.' });
+      }
+      if (Number(id) !== Number(userPharmacyId)) {
+        return res.status(403).json({ message: 'Nuk jeni i autorizuar për këtë farmaci.' });
+      }
     }
 
-    const [pharmacy] = await db.query(query, params);
+    // Fetch
+    const rows = await db.query(`${query} LIMIT 1`, params);
+    const pharmacy = rows[0];
 
     if (!pharmacy) {
-      return res.status(403).json({ message: 'Nuk jeni i autorizuar per kete farmaci.' });
+      // If nothing matched (either not found or filtered out by constraints)
+      return res.status(403).json({ message: 'Nuk jeni i autorizuar për këtë farmaci.' });
     }
 
-    res.json({ data: pharmacy });
+    return res.json({ data: pharmacy });
   } catch (err) {
     console.error('Get Pharmacy Error:', err);
-    res.status(500).json({ message: 'Gabim serveri.' });
+    return res.status(500).json({ message: 'Gabim serveri.' });
   }
 };
 
