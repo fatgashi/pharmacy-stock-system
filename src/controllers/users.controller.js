@@ -12,26 +12,72 @@ exports.getAllUsers = async (req, res) => {
 
   try {
     if (type === 'admin' && role === 'admin') {
-      // Admins
-      const adminSearchClause = search ? `WHERE username LIKE ?` : '';
-      const userSearchClause = search
-        ? `WHERE u.username LIKE ? OR p.name LIKE ?`
-        : '';
+      // Get total counts first
+      const adminCountQuery = search 
+        ? `SELECT COUNT(*) as count FROM admins WHERE username LIKE ?`
+        : `SELECT COUNT(*) as count FROM admins`;
+      const adminCountParams = search ? [`%${search}%`] : [];
+      
+      const userCountQuery = search
+        ? `SELECT COUNT(*) as count FROM users u LEFT JOIN pharmacies p ON u.pharmacy_id = p.id WHERE u.username LIKE ? OR p.name LIKE ?`
+        : `SELECT COUNT(*) as count FROM users`;
+      const userCountParams = search ? [`%${search}%`, `%${search}%`] : [];
 
-      const admins = await db.query(
-        `SELECT id, username, role, 'admin' AS type FROM admins ${adminSearchClause} LIMIT ? OFFSET ?`,
-        search ? [`%${search}%`, limit, offset] : [limit, offset]
-      );
+      const [adminCountResult] = await db.query(adminCountQuery, adminCountParams);
+      const [userCountResult] = await db.query(userCountQuery, userCountParams);
+      
+      const totalAdmins = adminCountResult.count;
+      const totalUsers = userCountResult.count;
+      const totalCount = totalAdmins + totalUsers;
 
-      const users = await db.query(
-        `SELECT u.id, u.username, u.pharmacy_id, 'user' AS type,
-                p.name AS pharmacy_name, p.address AS pharmacy_address
-         FROM users u
-         LEFT JOIN pharmacies p ON u.pharmacy_id = p.id
-         ${userSearchClause}
-         LIMIT ? OFFSET ?`,
-        search ? [`%${search}%`, `%${search}%`, limit, offset] : [limit, offset]
-      );
+      // Calculate how many items to take from each source
+      let adminLimit = 0;
+      let userLimit = 0;
+      let adminOffset = 0;
+      let userOffset = 0;
+
+      if (offset < totalAdmins) {
+        // We need some admins
+        adminLimit = Math.min(limit, totalAdmins - offset);
+        adminOffset = offset;
+        
+        // If we need more items, get them from users
+        if (adminLimit < limit) {
+          userLimit = limit - adminLimit;
+          userOffset = 0;
+        }
+      } else {
+        // We're past all admins, only get users
+        userLimit = limit;
+        userOffset = offset - totalAdmins;
+      }
+
+      // Fetch admins if needed
+      let admins = [];
+      if (adminLimit > 0) {
+        const adminSearchClause = search ? `WHERE username LIKE ?` : '';
+        admins = await db.query(
+          `SELECT id, username, role, email, 'admin' AS type FROM admins ${adminSearchClause} LIMIT ? OFFSET ?`,
+          search ? [`%${search}%`, adminLimit, adminOffset] : [adminLimit, adminOffset]
+        );
+      }
+
+      // Fetch users if needed
+      let users = [];
+      if (userLimit > 0) {
+        const userSearchClause = search
+          ? `WHERE u.username LIKE ? OR p.name LIKE ?`
+          : '';
+        users = await db.query(
+          `SELECT u.id, u.username, u.email, u.status, u.pharmacy_id, 'user' AS type,
+                  p.name AS pharmacy_name, p.address AS pharmacy_address, p.phone AS pharmacy_phone
+           FROM users u
+           LEFT JOIN pharmacies p ON u.pharmacy_id = p.id
+           ${userSearchClause}
+           LIMIT ? OFFSET ?`,
+          search ? [`%${search}%`, `%${search}%`, userLimit, userOffset] : [userLimit, userOffset]
+        );
+      }
 
       const combined = [...admins, ...users];
 
@@ -39,7 +85,7 @@ exports.getAllUsers = async (req, res) => {
         data: combined,
         page,
         limit,
-        total: combined.length,
+        total: totalCount,
       });
     }
 
@@ -57,12 +103,28 @@ exports.getAllUsers = async (req, res) => {
       const placeholders = pharmacyIds.map(() => '?').join(',');
       const baseParams = [...pharmacyIds];
       const whereSearch = search ? `AND (u.username LIKE ? OR p.name LIKE ?)` : '';
+      
+      // Get total count first
+      const countQuery = `
+        SELECT COUNT(*) as count
+        FROM users u
+        JOIN pharmacies p ON u.pharmacy_id = p.id
+        WHERE u.pharmacy_id IN (${placeholders}) ${whereSearch}
+      `;
+      const countParams = search 
+        ? [...baseParams, `%${search}%`, `%${search}%`]
+        : baseParams;
+      
+      const [countResult] = await db.query(countQuery, countParams);
+      const totalCount = countResult.count;
+
+      // Get paginated results
       const values = search
         ? [...baseParams, `%${search}%`, `%${search}%`, limit, offset]
         : [...baseParams, limit, offset];
 
       const users = await db.query(
-        `SELECT u.id, u.username, u.pharmacy_id, 'user' AS type,
+        `SELECT u.id, u.username, u.email, u.status, u.pharmacy_id, 'user' AS type,
                 p.name AS pharmacy_name, p.address AS pharmacy_address, p.phone AS pharmacy_phone
          FROM users u
          JOIN pharmacies p ON u.pharmacy_id = p.id
@@ -75,7 +137,7 @@ exports.getAllUsers = async (req, res) => {
         data: users,
         page,
         limit,
-        total: users.length,
+        total: totalCount,
       });
     }
 
@@ -93,7 +155,7 @@ exports.getUserById = async (req, res) => {
   try {
 
     let query = `
-      SELECT u.id, u.username, u.pharmacy_id, u.role, u.created_at, u.updated_at,
+      SELECT u.id, u.username, u.email, u.status, u.pharmacy_id, u.role, u.created_at, u.updated_at,
              p.name AS pharmacy_name, p.address AS pharmacy_address, p.phone AS pharmacy_phone
       FROM users u
       LEFT JOIN pharmacies p ON u.pharmacy_id = p.id
