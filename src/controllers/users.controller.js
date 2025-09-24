@@ -86,6 +86,137 @@ exports.getAllUsers = async (req, res) => {
   }
 };
 
+exports.getUserById = async (req, res) => {
+  const { id } = req.params;
+  const { role, type, id: requesterId } = req.user;
+
+  try {
+
+    let query = `
+      SELECT u.id, u.username, u.pharmacy_id, u.role, u.created_at, u.updated_at,
+             p.name AS pharmacy_name, p.address AS pharmacy_address, p.phone AS pharmacy_phone
+      FROM users u
+      LEFT JOIN pharmacies p ON u.pharmacy_id = p.id
+      WHERE u.id = ?
+    `;
+    let params = [id];
+
+    // If pharmacy_admin, ensure they can only access users from their pharmacies
+    if (role === 'pharmacy_admin') {
+      query += ` AND u.pharmacy_id IN (
+        SELECT id FROM pharmacies WHERE pharmacy_admin_id = ?
+      )`;
+      params.push(requesterId);
+    }
+
+    const [user] = await db.query(query, params);
+
+    if (!user) {
+      return res.status(404).json({ message: 'Përdoruesi nuk u gjet ose nuk keni autorizim për të parë këtë përdorues.' });
+    }
+
+    return res.json({ user });
+  } catch (err) {
+    console.error('Get User By ID Error:', err);
+    return res.status(500).json({ message: 'Gabim në server.' });
+  }
+};
+
+exports.editUser = async (req, res) => {
+  const { id } = req.params; // User ID to edit
+  const { role, type, id: requesterId } = req.user;
+  const { username, password, email, status } = safeBody(req);
+
+  try {
+
+    if (!username && !password && !email && !status) {
+      return res.status(400).json({ message: 'Duhet të ndryshoni të paktën username, password, email ose status.' });
+    }
+
+    let query = `
+      SELECT u.id, u.username, u.pharmacy_id, u.role
+      FROM users u
+      WHERE u.id = ?
+    `;
+    let params = [id];
+
+    if (role === 'pharmacy_admin') {
+      query += ` AND u.pharmacy_id IN (
+        SELECT id FROM pharmacies WHERE pharmacy_admin_id = ?
+      )`;
+      params.push(requesterId);
+    }
+
+    const [user] = await db.query(query, params);
+
+    if (!user) {
+      return res.status(404).json({ message: 'Përdoruesi nuk u gjet ose nuk keni autorizim për të ndryshuar këtë përdorues.' });
+    }
+
+    // Check if username is already taken by another user
+    if (username) {
+      const existing = await db.query('SELECT id FROM users WHERE username = ? AND id != ?', [username, id]);
+      if (existing.length > 0) {
+        return res.status(409).json({ message: 'Ky username është në përdorim.' });
+      }
+    }
+
+    // Check if email is already taken by another user
+    if (email) {
+      const existing = await db.query('SELECT id FROM users WHERE email = ? AND id != ?', [email, id]);
+      if (existing.length > 0) {
+        return res.status(409).json({ message: 'Ky email është në përdorim.' });
+      }
+    }
+
+    // Validate status if provided
+    if (status) {
+      const allowedStatuses = ['active', 'suspended'];
+      if (!allowedStatuses.includes(status)) {
+        return res.status(400).json({ message: 'Status i pavlefshëm. Lejohen vetëm: active ose suspended.' });
+      }
+    }
+
+    // Build dynamic update
+    const fields = [];
+    const values = [];
+
+    if (username) {
+      fields.push('username = ?');
+      values.push(username);
+    }
+
+    if (password) {
+      const hashed = await bcrypt.hash(password, 10);
+      fields.push('password_hash = ?');
+      values.push(hashed);
+    }
+
+    if (email) {
+      fields.push('email = ?', 'email_verified = 1');
+      values.push(email);
+    }
+
+    if (status) {
+      fields.push('status = ?');
+      values.push(status);
+    }
+
+    fields.push('updated_at = NOW()');
+    values.push(id); // for WHERE clause
+
+    await db.query(
+      `UPDATE users SET ${fields.join(', ')} WHERE id = ?`,
+      values
+    );
+
+    return res.json({ message: 'Përdoruesi u përditësua me sukses.' });
+  } catch (err) {
+    console.error('Edit User Error:', err);
+    return res.status(500).json({ message: 'Gabim në server.' });
+  }
+};
+
 exports.updateProfile = async (req, res) => {
     const { id } = req.user;
 

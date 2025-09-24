@@ -1,6 +1,7 @@
 // src/controllers/batch.controller.js
 const db = require('../config/mysql');
 const moment = require('moment-timezone');
+const { safeBody } = require('../helpers/safeBody');
 
 async function recalcProductSnapshot(conn, pharmacy_id, pharmacy_product_id) {
   const [sumRows] = await conn.query(
@@ -36,7 +37,7 @@ async function recalcProductSnapshot(conn, pharmacy_id, pharmacy_product_id) {
 exports.updateBatch = async (req, res) => {
   const { batchId } = req.params;
   const { pharmacy_id } = req.user;
-  const { quantity, expiry_date, status } = req.body;
+  const { quantity, expiry_date, status } = safeBody(req);
 
   let conn;
   try {
@@ -152,7 +153,6 @@ exports.updateBatch = async (req, res) => {
 exports.deleteBatch = async (req, res) => {
   const { batchId } = req.params;
   const { pharmacy_id } = req.user;
-  const hard = String(req.query.hard || 'false').toLowerCase() === 'true';
 
   let conn;
   try {
@@ -172,26 +172,13 @@ exports.deleteBatch = async (req, res) => {
       return res.status(404).json({ message: 'Batch nuk u gjet.' });
     }
 
-    if (hard) {
-      if (Number(batch.quantity) !== 0) {
-        await conn.rollback();
-        return res.status(400).json({ message: 'Nuk lejohet fshirja kur sasia > 0.' });
-      }
-      await conn.query(
-        `DELETE FROM product_batches WHERE id = ? AND pharmacy_id = ?`,
-        [batchId, pharmacy_id]
-      );
-    } else {
-      // Soft delete to match enum (no 'void'): use 'disposed' + zero quantity
-      await conn.query(
-        `UPDATE product_batches
-            SET status = 'disposed', quantity = 0, updated_at = NOW()
-          WHERE id = ? AND pharmacy_id = ?`,
-        [batchId, pharmacy_id]
-      );
-    }
+    // Hard delete - remove the batch entity completely
+    await conn.query(
+      `DELETE FROM product_batches WHERE id = ? AND pharmacy_id = ?`,
+      [batchId, pharmacy_id]
+    );
 
-    // Determine the product id (if hard-deleted, we still have it in 'batch')
+    // Determine the product id for recalculation
     const pharmacy_product_id = batch.pharmacy_product_id;
 
     const { newQty, nextExpiry } = await recalcProductSnapshot(
@@ -202,7 +189,7 @@ exports.deleteBatch = async (req, res) => {
 
     await conn.commit();
     return res.json({
-      message: hard ? 'Batch u fshi.' : 'Batch u çaktivizua.',
+      message: 'Batch u fshi.',
       product_quantity: newQty,
       product_next_expiry: nextExpiry
     });
