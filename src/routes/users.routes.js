@@ -9,6 +9,7 @@ router.put('/profile', authenticateJWT, authRoleMiddleware('user'), usersControl
 router.get('/profile', authenticateJWT, usersController.getProfile);
 router.get('/:id', authenticateJWT, authRoleMiddleware('admin', 'pharmacy_admin'), usersController.getUserById);
 router.put('/:id', authenticateJWT, authRoleMiddleware('admin', 'pharmacy_admin'), usersController.editUser);
+router.delete('/:id', authenticateJWT, authRoleMiddleware('admin', 'pharmacy_admin'), usersController.deleteUser);
 
 
 module.exports = router;

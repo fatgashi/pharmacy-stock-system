@@ -134,6 +134,9 @@ exports.login = async (req, res) => {
         const users = await db.query('SELECT * FROM users WHERE username = ?', [username]);
         if (users.length > 0) {
         const user = users[0];
+        if (user.isDeleted || user.status === 'suspended') {
+            return res.status(401).json({ message: 'Ky user është i fshirë ose i suspenduar!' });
+        }
         const match = await bcrypt.compare(password, user.password_hash);
         if (!match) return res.status(401).json({ message: 'Password eshte gabim!' });
 

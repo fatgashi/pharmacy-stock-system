@@ -19,8 +19,8 @@ exports.getAllUsers = async (req, res) => {
       const adminCountParams = search ? [`%${search}%`] : [];
       
       const userCountQuery = search
-        ? `SELECT COUNT(*) as count FROM users u LEFT JOIN pharmacies p ON u.pharmacy_id = p.id WHERE u.username LIKE ? OR p.name LIKE ?`
-        : `SELECT COUNT(*) as count FROM users`;
+        ? `SELECT COUNT(*) as count FROM users u LEFT JOIN pharmacies p ON u.pharmacy_id = p.id WHERE u.isDeleted = 0 AND (u.username LIKE ? OR p.name LIKE ?)`
+        : `SELECT COUNT(*) as count FROM users WHERE isDeleted = 0`;
       const userCountParams = search ? [`%${search}%`, `%${search}%`] : [];
 
       const [adminCountResult] = await db.query(adminCountQuery, adminCountParams);
@@ -73,7 +73,7 @@ exports.getAllUsers = async (req, res) => {
                   p.name AS pharmacy_name, p.address AS pharmacy_address, p.phone AS pharmacy_phone
            FROM users u
            LEFT JOIN pharmacies p ON u.pharmacy_id = p.id
-           ${userSearchClause}
+           WHERE u.isDeleted = 0 ${userSearchClause ? 'AND ' + userSearchClause.replace('WHERE ', '') : ''}
            LIMIT ? OFFSET ?`,
           search ? [`%${search}%`, `%${search}%`, userLimit, userOffset] : [userLimit, userOffset]
         );
@@ -109,7 +109,7 @@ exports.getAllUsers = async (req, res) => {
         SELECT COUNT(*) as count
         FROM users u
         JOIN pharmacies p ON u.pharmacy_id = p.id
-        WHERE u.pharmacy_id IN (${placeholders}) ${whereSearch}
+        WHERE u.isDeleted = 0 AND u.pharmacy_id IN (${placeholders}) ${whereSearch}
       `;
       const countParams = search 
         ? [...baseParams, `%${search}%`, `%${search}%`]
@@ -128,7 +128,7 @@ exports.getAllUsers = async (req, res) => {
                 p.name AS pharmacy_name, p.address AS pharmacy_address, p.phone AS pharmacy_phone
          FROM users u
          JOIN pharmacies p ON u.pharmacy_id = p.id
-         WHERE u.pharmacy_id IN (${placeholders}) ${whereSearch}
+         WHERE u.isDeleted = 0 AND u.pharmacy_id IN (${placeholders}) ${whereSearch}
          LIMIT ? OFFSET ?`,
         values
       );
@@ -159,7 +159,7 @@ exports.getUserById = async (req, res) => {
              p.name AS pharmacy_name, p.address AS pharmacy_address, p.phone AS pharmacy_phone
       FROM users u
       LEFT JOIN pharmacies p ON u.pharmacy_id = p.id
-      WHERE u.id = ?
+      WHERE u.id = ? AND u.isDeleted = 0
     `;
     let params = [id];
 
@@ -196,9 +196,9 @@ exports.editUser = async (req, res) => {
     }
 
     let query = `
-      SELECT u.id, u.username, u.pharmacy_id, u.role
+      SELECT u.id, u.username, u.pharmacy_id, u.role, u.isDeleted
       FROM users u
-      WHERE u.id = ?
+      WHERE u.id = ? AND u.isDeleted = 0
     `;
     let params = [id];
 
@@ -326,13 +326,58 @@ exports.updateProfile = async (req, res) => {
     }
 };
 
+exports.deleteUser = async (req, res) => {
+  const { id } = req.params; // User ID to delete
+  const { role, type, id: requesterId } = req.user;
+
+  try {
+    // Check if user exists and get their details
+    let query = `
+      SELECT u.id, u.username, u.pharmacy_id, u.role, u.isDeleted
+      FROM users u
+      WHERE u.id = ?
+    `;
+    let params = [id];
+
+    // If pharmacy_admin, ensure they can only delete users from their pharmacies
+    if (role === 'pharmacy_admin') {
+      query += ` AND u.pharmacy_id IN (
+        SELECT id FROM pharmacies WHERE pharmacy_admin_id = ?
+      )`;
+      params.push(requesterId);
+    }
+
+    const [user] = await db.query(query, params);
+
+    if (!user) {
+      return res.status(404).json({ message: 'Përdoruesi nuk u gjet ose nuk keni autorizim për të fshirë këtë përdorues.' });
+    }
+
+    // Check if user is already deleted
+    if (user.isDeleted) {
+      return res.status(400).json({ message: 'Përdoruesi është tashmë i fshirë.' });
+    }
+
+    // Soft delete the user
+    await db.query(
+      `UPDATE users SET isDeleted = 1, updated_at = NOW() WHERE id = ?`,
+      [id]
+    );
+
+    return res.json({ message: 'Përdoruesi u fshi me sukses.' });
+  } catch (err) {
+    console.error('Delete User Error:', err);
+    return res.status(500).json({ message: 'Gabim në server.' });
+  }
+};
+
 exports.getProfile = async (req, res) => {
   const { id, type } = req.user;
 
   try {
     if (type === 'user') {
       const [user] = await db.query(
-        `SELECT id, username, pharmacy_id, role, created_at, updated_at FROM users WHERE id = ?`,
+        `SELECT id, username, pharmacy_id, role, created_at, updated_at FROM users WHERE id = ? AND isDeleted = 0`,
         [id]
       );
 
