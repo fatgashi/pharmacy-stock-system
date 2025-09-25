@@ -7,7 +7,11 @@ async function recalcProductSnapshot(conn, pharmacy_id, pharmacy_product_id) {
   const [sumRows] = await conn.query(
     `SELECT COALESCE(SUM(quantity), 0) AS qty
        FROM product_batches
-      WHERE pharmacy_id = ? AND pharmacy_product_id = ? AND status = 'active'`,
+      WHERE pharmacy_id = ?
+        AND pharmacy_product_id = ?
+        AND status = 'active'
+        AND quantity > 0
+        AND (expiry_date IS NULL OR expiry_date >= CURRENT_DATE())`,
     [pharmacy_id, pharmacy_product_id]
   );
   const newQty = Number(sumRows[0]?.qty || 0);
@@ -19,7 +23,8 @@ async function recalcProductSnapshot(conn, pharmacy_id, pharmacy_product_id) {
         AND pharmacy_product_id = ?
         AND status = 'active'
         AND quantity > 0
-        AND expiry_date IS NOT NULL`,
+        AND expiry_date IS NOT NULL
+        AND expiry_date >= CURRENT_DATE()`,
     [pharmacy_id, pharmacy_product_id]
   );
   const nextExpiry = expRows[0]?.next_expiry || null;
@@ -32,6 +37,17 @@ async function recalcProductSnapshot(conn, pharmacy_id, pharmacy_product_id) {
   );
 
   return { newQty, nextExpiry };
+}
+
+async function batchHasUsage(conn, { batchId, pharmacy_id }) {
+  const [rows] = await conn.query(
+    `SELECT 1
+       FROM sale_batch_usages
+      WHERE batch_id = ? AND pharmacy_id = ?
+      LIMIT 1`,
+    [batchId, pharmacy_id]
+  );
+  return rows.length > 0;
 }
 
 exports.updateBatch = async (req, res) => {
@@ -69,12 +85,19 @@ exports.updateBatch = async (req, res) => {
       return res.status(404).json({ message: 'Produkti nuk u gjet.' });
     }
 
+    // Usage guard
+    const used = await batchHasUsage(conn, { batchId, pharmacy_id });
+
     // Build updates
     const fields = [];
     const params = [];
 
-    // Quantity (absolute SET)
+    // Quantity (absolute SET) — disallow if batch is USED
     if (quantity != null) {
+      if (used) {
+        await conn.rollback();
+        return res.status(400).json({ message: 'Ky batch është përdorur në shitje. Nuk lejohet ndryshimi i sasisë.' });
+      }
       const q = Number(quantity);
       if (!Number.isFinite(q) || q < 0) {
         await conn.rollback();
@@ -83,7 +106,7 @@ exports.updateBatch = async (req, res) => {
       fields.push('quantity = ?'); params.push(q);
     }
 
-    // Expiry date
+    // Expiry date (always allow correction)
     if (expiry_date !== undefined) {
       if (expiry_date === null || expiry_date === '') {
         fields.push('expiry_date = NULL');
@@ -105,9 +128,14 @@ exports.updateBatch = async (req, res) => {
         return res.status(400).json({ message: 'Status i pavlefshëm.' });
       }
 
-      // If non-sellable, force quantity 0
+      // If USED, forbid re-activating a non-saleable batch back to 'active'
+      if (used && status === 'active' && batch.status !== 'active') {
+        await conn.rollback();
+        return res.status(400).json({ message: 'Ky batch është përdorur. Nuk lejohet rikthimi në statusin "active".' });
+      }
+
+      // Moving to 'disposed' or 'returned' should zero out quantity
       if (status === 'disposed' || status === 'returned') {
-        // Set status and zero out quantity regardless of previous edit
         fields.push('status = ?', 'quantity = 0'); params.push(status);
       } else {
         // 'active' or 'expired'
@@ -149,7 +177,6 @@ exports.updateBatch = async (req, res) => {
   }
 };
 
-
 exports.deleteBatch = async (req, res) => {
   const { batchId } = req.params;
   const { pharmacy_id } = req.user;
@@ -172,19 +199,45 @@ exports.deleteBatch = async (req, res) => {
       return res.status(404).json({ message: 'Batch nuk u gjet.' });
     }
 
-    // Hard delete - remove the batch entity completely
+    const used = await batchHasUsage(conn, { batchId, pharmacy_id });
+
+    // If batch is USED or has quantity > 0 -> archive instead of delete
+    if (used || Number(batch.quantity) > 0) {
+      await conn.query(
+        `UPDATE product_batches
+            SET status = 'disposed',
+                quantity = 0,
+                updated_at = NOW()
+          WHERE id = ? AND pharmacy_id = ?`,
+        [batchId, pharmacy_id]
+      );
+
+      const { newQty, nextExpiry } = await recalcProductSnapshot(
+        conn,
+        pharmacy_id,
+        batch.pharmacy_product_id
+      );
+
+      await conn.commit();
+      return res.json({
+        message: used
+          ? 'Batch u arkivua (i përdorur në shitje, nuk mund të fshihet).'
+          : 'Batch u arkivua (kishte sasi > 0).',
+        product_quantity: newQty,
+        product_next_expiry: nextExpiry
+      });
+    }
+
+    // Truly unused and empty -> hard delete
     await conn.query(
       `DELETE FROM product_batches WHERE id = ? AND pharmacy_id = ?`,
       [batchId, pharmacy_id]
     );
 
-    // Determine the product id for recalculation
-    const pharmacy_product_id = batch.pharmacy_product_id;
-
     const { newQty, nextExpiry } = await recalcProductSnapshot(
       conn,
       pharmacy_id,
-      pharmacy_product_id
+      batch.pharmacy_product_id
     );
 
     await conn.commit();
