@@ -77,6 +77,8 @@ exports.getProductFromGlobal = async (req, res) => {
   }
 }
 
+// src/controllers/your_controller_file.js (only the getProductDetails export)
+
 exports.getProductDetails = async (req, res) => {
   const { id } = req.params; // pharmacy_products.id
   const { pharmacy_id } = req.user;
@@ -95,9 +97,7 @@ exports.getProductDetails = async (req, res) => {
 
   const allowedOrderBy = new Set(['expiry_date', 'created_at']);
   const orderBy = allowedOrderBy.has(orderByRaw) ? orderByRaw : 'expiry_date';
-
   const order = (orderRaw === 'desc') ? 'DESC' : 'ASC';
-
   const offset = (page - 1) * limit;
 
   try {
@@ -124,46 +124,71 @@ exports.getProductDetails = async (req, res) => {
       return res.status(404).json({ message: 'Produkti nuk u gjet.' });
     }
 
-    // 2) Build WHERE for batches
-    let where = `WHERE pharmacy_product_id = ? AND pharmacy_id = ?`;
-    const params = [id, pharmacy_id];
-
-    if (!includeEmpty) {
-      where += ` AND quantity > 0`;
-    }
+    // 2) WHERE for batches (no alias, used for COUNT only)
+    let whereNoAlias = `WHERE pharmacy_product_id = ? AND pharmacy_id = ?`;
+    const paramsNoAlias = [id, pharmacy_id];
+    if (!includeEmpty) whereNoAlias += ` AND quantity > 0`;
 
     // 3) Total count (for pagination)
     const countRows = await db.query(
-      `SELECT COUNT(*) AS total FROM product_batches ${where}`,
-      params
+      `SELECT COUNT(*) AS total FROM product_batches ${whereNoAlias}`,
+      paramsNoAlias
     );
     const total = Number(countRows[0]?.total || 0);
 
-    // 4) Batches listing (active first, then by chosen field, NULLS LAST)
-    // We keep active first for usability; adjust if you ever want otherwise.
+    // 4) Batches listing WITH usage flags (aliased query)
+    //    LEFT JOIN a compact usage aggregate so we can compute has_usage & quantity_editable
+    let whereAliased = `WHERE b.pharmacy_product_id = ? AND b.pharmacy_id = ?`;
+    const paramsAliased = [id, pharmacy_id];
+    if (!includeEmpty) whereAliased += ` AND b.quantity > 0`;
+
     const batches = await db.query(
       `
       SELECT 
-          id, pharmacy_product_id, quantity, expiry_date, status, created_at, updated_at
-      FROM product_batches
-      ${where}
+          b.id,
+          b.pharmacy_product_id,
+          b.quantity,
+          b.expiry_date,
+          b.status,
+          b.created_at,
+          b.updated_at,
+          COALESCE(u.usage_count, 0) AS usage_count,
+          CASE WHEN COALESCE(u.usage_count, 0) > 0 THEN TRUE ELSE FALSE END AS has_usage,
+          CASE WHEN COALESCE(u.usage_count, 0) = 0 THEN TRUE ELSE FALSE END AS quantity_editable,
+          CASE 
+            WHEN b.status = 'active'
+             AND b.quantity > 0
+             AND (b.expiry_date IS NULL OR b.expiry_date >= CURRENT_DATE())
+            THEN TRUE ELSE FALSE
+          END AS is_saleable
+      FROM product_batches b
+      LEFT JOIN (
+        SELECT batch_id, COUNT(*) AS usage_count
+        FROM sale_batch_usages
+        WHERE pharmacy_id = ?
+        GROUP BY batch_id
+      ) u ON u.batch_id = b.id
+      ${whereAliased}
       ORDER BY 
-          CASE WHEN status = 'active' THEN 0 ELSE 1 END,
-          ${orderBy} IS NULL,        -- push NULLs last
-          ${orderBy} ${order},
-          id ASC
+          CASE WHEN b.status = 'active' THEN 0 ELSE 1 END,
+          ${orderBy === 'expiry_date' ? 'b.expiry_date' : 'b.created_at'} IS NULL,
+          ${orderBy === 'expiry_date' ? 'b.expiry_date' : 'b.created_at'} ${order},
+          b.id ASC
       LIMIT ? OFFSET ?
       `,
-      [...params, limit, offset]
+      [pharmacy_id, ...paramsAliased, limit, offset]
     );
 
-    // 5) Quick aggregate sanity (sum active quantities across *all* batches)
-    //    Note: This ignores pagination—intentionally, to compare against product.quantity.
+    // 5) Aggregate “active” quantity consistent with snapshot logic
     const activeAggRows = await db.query(
       `
       SELECT COALESCE(SUM(quantity), 0) AS active_qty
       FROM product_batches
-      WHERE pharmacy_product_id = ? AND pharmacy_id = ? AND status = 'active'
+      WHERE pharmacy_product_id = ? 
+        AND pharmacy_id = ? 
+        AND status = 'active'
+        AND quantity > 0
+        AND (expiry_date IS NULL OR expiry_date >= CURRENT_DATE())
       `,
       [id, pharmacy_id]
     );
