@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const db = require('../config/mysql');
 const { sendEmail } = require('../config/email');
 const { safeBody } = require('../helpers/safeBody');
+const { sendContactEmail } = require('../config/contactMailer');
 require('dotenv').config();
 
 // Add email to profile and send confirmation
@@ -361,5 +362,43 @@ exports.getEmailStatus = async (req, res) => {
   } catch (err) {
     console.error('Get Email Status Error:', err);
     res.status(500).json({ message: 'Gabim në server gjatë marrjes së statusit të email-it!' });
+  }
+};
+
+const isEmail = (v) => typeof v === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+
+exports.postContact = async (req, res) => {
+  try {
+    const {
+      firstName,
+      lastName,
+      email,
+      phone = '',
+      company = '',
+      subject = '',
+      message,
+    } = req.body || {};
+
+    if (!firstName || !lastName || !email || !subject || !message) {
+      return res.status(400).json({ ok: false, error: 'MISSING_FIELDS' });
+    }
+    if (!isEmail(email)) {
+      return res.status(400).json({ ok: false, error: 'INVALID_EMAIL' });
+    }
+
+    const result = await sendContactEmail({
+      firstName,
+      lastName,
+      email,
+      phone,
+      company,
+      subject,
+      message,
+    });
+
+    return res.json({ ok: true, messageId: result.messageId });
+  } catch (err) {
+    console.error('Contact controller error:', err);
+    return res.status(500).json({ ok: false, error: 'MAIL_FAILED' });
   }
 };

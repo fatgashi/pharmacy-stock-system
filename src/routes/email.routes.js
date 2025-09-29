@@ -9,6 +9,8 @@ router.use(authenticateJWT);
 // Add email to profile and send confirmation
 router.post('/add', emailController.addEmailToProfile);
 
+router.post('/contact', emailController.postContact);
+
 // Get email status
 router.get('/status', emailController.getEmailStatus);
 
