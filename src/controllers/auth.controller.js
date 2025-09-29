@@ -144,6 +144,8 @@ exports.login = async (req, res) => {
             id: user.id,
             username: user.username,
             pharmacy_id: user.pharmacy_id,
+            isDeleted: user.isDeleted,
+            status: user.status,
             role: "user",
             type: 'user'
         };
